@@ -1,0 +1,65 @@
+# A770 Pitfalls and Negative Results
+
+## Table of Contents
+
+- API / hardware gates
+- Structural experiments that failed
+- Behavioral traps
+- Diagnostic traps
+
+Cross-reference: the code that hits these gates lives in [code-snippets.md](code-snippets.md); API details and commands are in [api-usage.md](api-usage.md).
+
+## API / Hardware Gates
+
+| Item | Status on A770 | Evidence |
+|---|---|---|
+| `joint_matrix_prefetch` | Unsupported on DG2 | intel/llvm e2e test is marked `UNSUPPORTED: gpu-intel-dg2` |
+| DPAS `ExecutionSize=16` | Compiles, wrong results | Smoke test: 78/128 errors |
+| `load_2d` / `prefetch_2d` | PVC-only | A770 hangs; bf16 `Transposed` rejected at compile time (u32/u64 only) |
+| `named_barrier` | PVC-only | `memory.hpp`: available only on PVC |
+| `dpas<SystolicDepth=16>` | Compile-time rejected | `static_assert(SystolicDepth == 8)` |
+| `block_load` 512 B | PVC-only | DG2 cap is 256 B |
+| Large GRF `-ze-opt-large-register-file` | Negative or fails | joint_matrix: 211.2 / 180.3 / 193.9 ms vs 143.7 ms baseline; ESIMD run exits with code 1 |
+| A `block_load` L1/L2 cache hint | Neutral | 0.0641 to 0.0659 ms vs 0.0632 to 0.0646 ms |
+
+## Structural Experiments That Failed
+
+All variants were correct (`errors: 0/...`) and slower than the stated baseline.
+
+| Experiment | Measured | Baseline | Why it failed |
+|---|---:|---:|---|
+| joint_matrix software prefetch | 0.6606 ms | 0.6397 ms SLM-only | Data fits 16 MB L2; prefetch only adds Send instructions |
+| ESIMD A next-block prefetch | 0.0707 to 0.0715 ms | 0.0628 to 0.0646 ms | +8 prefetch Sends per pair outweigh hidden A latency |
+| Double buffer at 32x32 tiles | 0.6695 ms | 0.6397 ms | Compute per block too short; barriers still wait on load |
+| 3-level SLM (36 KB) | 0.1182 to 0.1197 ms | 0.0992 ms | SLM growth reduces resident work-groups |
+| 4-level SLM + 2 GRF copies (ESIMD) | 0.282 ms | 0.0992 ms | Register pressure and SLM occupancy |
+| GRF double copy (joint_matrix, unrolled) | 0.1248 to 0.1253 ms | 0.11831 ms | Explicit duplicate joint_matrix registers degrade IGC allocation |
+| GRF double copy (joint_matrix, runtime branch) | 0.4176 ms | 0.11831 ms | Runtime branch plus register pressure; catastrophic |
+| BK=32 + 4-level SLM (joint_matrix) | 0.1498 to 0.1512 ms | 0.11831 ms | Larger K block and SLM usage hurt in SYCL |
+| BK=64 (ESIMD, 48 KB SLM) | 0.2639 to 0.2658 ms | 0.0992 ms | 48 KB SLM occupancy loss |
+| 8-buffer B (32 KB SLM) | 0.0690 to 0.0703 ms | 0.0628 to 0.0646 ms | Occupancy loss beats barrier savings; 16 KB is the sweet spot |
+| 16x8 per-thread + 64 threads (A direct) | 0.0832 to 0.0835 ms | 0.0628 to 0.0646 ms | A read amplification 4x -> 8x |
+| 16x8 per-thread + 64 threads (A SLM relay) | 0.0780 to 0.0791 ms | 0.0613 to 0.0615 ms | A SLM read amplification 8x plus residency constraint |
+| SLM bank padding (1056 B / 288 B slots) | 0.0698 to 0.0704 ms | 0.0613 to 0.0615 ms | 256 B LSC blocks already span banks; padding breaks alignment |
+| A prepack for joint_matrix | 0.154 to 0.169 ms | 0.1437 ms | Host-side index math overhead beat layout benefit |
+| Simple Boustrophedon walk | 0.1185 ms | 0.11831 ms | oneDNN's version needs fused linear ID + runtime bslice/bthresh |
+| M-first walk | 0.106 ms | 0.0992 ms (N-first) | N-first has better L2 reuse |
+| 16x32 tile (ESIMD) | 0.3375 ms | 0.0992 ms | Register pressure |
+| 16x24 tile (ESIMD) | 0.1004 to 0.1013 ms | 0.0992 ms | Slightly worse; single-wave assumption failed |
+| `dpasw` to save instructions | No gain | - | For 16x16 tile it emits the same number of instructions as `dpas` |
+| A SLM relay + 4-buffer B (32 KB) | Run failure | - | Pair loop conflicts 2 A buffers with 2-block lookahead; abandoned |
+
+## Behavioral Traps
+
+- Runtime `if/else` inside an ESIMD kernel hangs on A770. Dispatch behavior at compile time with template `if constexpr` and instantiate both kernel paths from the host.
+- When benchmarking `C = alpha*A*B + beta*C`, a timed loop accumulates beta effects across iterations. Restore C0 after timing and run a single-shot kernel for the correctness check.
+- VNNI-packed B reference math must use the original B array, not the packed array. The packed uint32 layout is column-pair interleaved: word index `(k/2)*N + n`, low 16 bits `B[2k][n]`, high 16 bits `B[2k+1][n]`.
+- `bit_cast_view<bf16>()` requires an lvalue `simd`; calling it on a temporary fails to compile. Store the loaded `simd` in a named variable first.
+- Higher occupancy is not automatically faster. oneDNN at 28.7% occupancy beat an ESIMD variant at 58.4% because instruction volume was lower.
+- Large GRF advice from official guides targets PVC (8x16x16, 32x64x16 blocks) and does not transfer to DG2.
+
+## Diagnostic Traps
+
+- VTune `full-compute` fails with "Allow multiple runs" unless you pass `-allow-multiple-runs`; `instruction-count` does not need it.
+- Without admin rights, VTune lacks EU-level detail (occupancy, barrier stalls); still useful for instruction-count and launch overhead.
+- Wall clock and kernel time differ: our best kernel had about 1.7 us launch gap, already better than oneDNN's 4.3 us. Optimize launch only after measuring it.
