@@ -1,11 +1,11 @@
 ---
 name: optimize-intel-gpu-kernels
-description: "Optimize SYCL/ESIMD compute kernels for Intel Arc/Xe-HPG GPUs (A770/DG2). Use when writing or tuning high-performance kernels on Intel discrete GPUs: choosing tiling, register blocking, XMX/joint_matrix/dpas, SLM buffering, walk order, operand layouts, or row-reduction operators such as RMSNorm/layer normalization; interpreting VTune gpu-hotspots; checking whether an Intel API (prefetch, load_2d, large GRF, DPAS ES16, named_barrier) is supported on A770; or benchmarking against oneMKL/oneDNN."
+description: "Optimize SYCL/ESIMD compute kernels for Intel Arc/Xe-HPG GPUs (A770/DG2). Use when writing or tuning high-performance kernels on Intel discrete GPUs: choosing tiling, register blocking, XMX/joint_matrix/dpas, SLM buffering, walk order, operand layouts, or row-reduction operators such as RMSNorm/layer normalization/softmax; interpreting VTune gpu-hotspots; checking whether an Intel API (prefetch, load_2d, large GRF, DPAS ES16, named_barrier) is supported on A770; or benchmarking against oneMKL/oneDNN."
 ---
 
 # Intel GPU Kernel Optimization
 
-Optimize SYCL/ESIMD kernels on Intel Arc A770 (Xe-HPG/DG2) with measured hardware facts, a proven technique ladder, known pitfalls, and API usage rules extracted from a complete bf16 GEMM campaign (naive 1.95 ms to 0.0614 ms, about 87% of oneMKL and 90% of oneDNN), a f32 GEMV campaign (naive 2.65 ms to 0.215 ms, faster than the same-operation oneMKL/oneDNN baselines), and a f32 RMSNorm campaign (naive 5.382 ms to 0.098 ms, about 1.25x faster than the oneDNN RMSNorm baseline).
+Optimize SYCL/ESIMD kernels on Intel Arc A770 (Xe-HPG/DG2) with measured hardware facts, a proven technique ladder, known pitfalls, and API usage rules extracted from a complete bf16 GEMM campaign (naive 1.95 ms to 0.0614 ms, about 87% of oneMKL and 90% of oneDNN), a f32 GEMV campaign (naive 2.65 ms to 0.215 ms, faster than the same-operation oneMKL/oneDNN baselines), a f32 RMSNorm campaign (naive 5.382 ms to 0.098 ms, about 1.25x faster than the oneDNN RMSNorm baseline), and a f32 Softmax campaign (naive 5.55 ms to 0.107 ms for 1024x4096, about 2x faster than the oneDNN softmax baseline).
 
 ## Workflow
 
@@ -50,6 +50,8 @@ For f32 GEMV (`y = A*x`, `4096x4096`, row-major A), the measured standard-SYCL l
 
 For f32 RMSNorm (`1024x4096`, x/gamma/y f32), the measured standard-SYCL ladder is: naive row-per-item 5.382 ms -> sub-group-per-row direct L2 0.153 to 0.157 ms -> SLM row tile with one row per 128-thread work-group and two barriers 0.098 to 0.100 ms. Same-operation baseline: oneDNN `layer_normalization_forward` with `rms_norm` flag, 0.1235 to 0.1242 ms. SLM staging wins here even though it lost for GEMV's x, because RMSNorm re-reads each row after the reduction. Details: [techniques.md](references/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); copy-ready kernel: [code-snippets.md](references/code-snippets.md#f32-rmsnorm-core-slm-row-tile).
 
+For f32 Softmax (`1024x4096`, row-major x/y f32), the measured standard-SYCL ladder is: naive row-per-item 5.55 ms -> one-shot SLM row tile (128 threads/WG) 0.1125 ms -> 32 KB one-shot limit (0.1125 ms at 4096 cols, 0.211 ms at 8192 cols) -> `vec16` exp accumulator and vector stores 0.107 ms -> dynamic WG size by column count (16/32/128 threads) 0.109 ms final, with oneDNN softmax at 0.217 ms. Rows larger than the SLM tile (16384 cols) use a tiled variant with max read directly from global, reaching 0.59 ms vs oneDNN 2.64 ms. Details: [techniques.md](references/techniques.md#f32-softmax-ladder); copy-ready kernel: [code-snippets.md](references/code-snippets.md#f32-softmax-core-slm-row-tile).
+
 ## 3. A770 Pitfalls
 
 - `prefetch` (SYCL or ESIMD): negative on A770 for GEMM-sized data that fits the 16 MB L2.
@@ -68,6 +70,11 @@ For f32 RMSNorm (`1024x4096`, x/gamma/y f32), the measured standard-SYCL ladder 
 - `esimd::reduce(v, std::plus<float>{})` silently returns 0 on A770 because the implementation only matches `std::plus<>`. Use `esimd::reduce(v, std::plus<>{})`.
 - ESIMD experiments on driver 32.0.101.8724 caused a full system reboot with bugcheck `0x00000116` (VIDEO_TDR_FAILURE). Before running new ESIMD kernel shapes, isolate them in a small one-shot process with a watchdog and collect driver/minidump evidence; do not assume a hang is recoverable.
 - oneDNN GPU matmul `1xK` (`src {1,K}` x `weights {K,N}`) is not a row-major `A*x` GEMV; it is `x*A`, i.e. `A^T*x`. It can look much faster but is wrong for the reference layout. Use `Kx1` for the same operator and always verify the library result.
+- `sycl::reduce_over_group` takes a group object, not an `nd_item`: pass `it.get_group()` (or a `sub_group`) or oneAPI 2026.1 rejects the call at compile time.
+- `vec<float,16>` loads/stores are 64 B operations; `std::vector` and buffer-backed host memory are not guaranteed 64 B aligned. Use `sycl::aligned_alloc_shared/device<float>(64, ...)` on the fast path and keep a scalar generic path for arbitrary column counts.
+- Shrink the work-group size for small rows/columns. For softmax, 16 threads for cols <= 256, 32 for cols <= 1024, and 128 otherwise removed idle-thread waste; 1024x256 went from 1.34x the oneDNN time to faster than it.
+- For rows larger than one SLM tile, compute the max pass directly from global and stage SLM tiles only for the sum and normalize passes. That cut 1024x16384 softmax from 0.66 ms to 0.59 ms by reducing global reads from three to two.
+- oneDNN softmax baseline: use `softmax_forward` + `algorithm::softmax_accurate` with `axis=1` and verify against the CPU reference. Its 1024x16384 f32 path measured 2.64 ms, much slower than smaller shapes, so re-measure the baseline per shape before trusting it.
 
 Complete evidence table: [pitfalls.md](references/pitfalls.md)
 
@@ -77,7 +84,7 @@ Complete evidence table: [pitfalls.md](references/pitfalls.md)
 - ESIMD: `esimd::dpas<8, RepeatCount, float>(C, B, A)` with VNNI B; `slm_block_load/store`, `barrier()`, `block_load` with `overaligned_tag<16>{}`.
 - ESIMD reductions: pass `std::plus<>{}` (or `std::multiplies<>{}`) to `esimd::reduce`; typed functors such as `std::plus<float>{}` compile but hit an empty branch and return the default value.
 - Standard SYCL GEMV: use a 2D `nd_range` with one row per sub-group, `vec<float,16>` loads, and a per-lane trip count derived from the actual `sub_group` size. Reading `x` directly from L2 beat staging it in SLM.
-- Row-reduction operators (RMSNorm, layer norm): stage the full row in SLM and normalize from SLM. For 1024x4096 RMSNorm, direct L2 re-read after reduction was 0.153 to 0.157 ms while a 16 KB SLM row tile reached 0.098 to 0.100 ms.
+- Row-reduction operators (RMSNorm, layer norm, softmax): stage the full row in SLM and normalize from SLM. For 1024x4096 RMSNorm, direct L2 re-read after reduction was 0.153 to 0.157 ms while a 16 KB SLM row tile reached 0.098 to 0.100 ms. For softmax, shrink WG size for short rows and compute the max pass directly from global when the row exceeds the SLM tile.
 - `bit_cast_view<bf16>()` requires an lvalue `simd`; calling it on a temporary fails to compile.
 - Windows build: `cmd /c '"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" && icx-cl /fsycl file.cpp /Fe:file.exe'`.
 - VTune: `instruction-count` needs no admin; `full-compute` needs `-allow-multiple-runs`.

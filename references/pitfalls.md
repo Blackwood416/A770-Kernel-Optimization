@@ -28,6 +28,8 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](code
 | `group_barrier(it, fence_space)` | Compile error | oneAPI 2026.1 expects a `memory_scope`; use `it.barrier(access::fence_space::local_space)` |
 | ESIMD SLM/`block_store` experiments (driver 32.0.101.8724) | Full system reboot | Bugcheck `0x00000116` VIDEO_TDR_FAILURE at 20:58:56; minidump `080526-7171-01.dmp` |
 | oneDNN matmul `1xK` as a GEMV baseline | Wrong operator | Computes `x*A` (`A^T*x`); max_err 326 vs the CPU reference, so the 0.182 ms number is not comparable |
+| `sycl::reduce_over_group(nd_item, ...)` | Compile error | oneAPI 2026.1 requires a group object; pass `it.get_group()` or a `sub_group`, not the `nd_item` |
+| `vec<float,16>` on `std::vector`/buffer host memory | Alignment risk | 64 B loads need aligned USM; use `sycl::aligned_alloc_shared/device<float>(64, ...)` on the fast path and a scalar generic path for odd columns |
 
 ## Structural Experiments That Failed
 
@@ -67,6 +69,9 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 | RMSNorm 1 row/WG, wg256 (2 barriers) | 0.1005 to 0.1029 ms | 0.0989 to 0.1000 ms wg128 | Larger work-group reduced residency |
 | RMSNorm `vec16` square accumulator | 0.100 to 0.101 ms | 0.0989 to 0.1000 ms scalar loop | Neutral; compiler already vectorized the scalar loop |
 | RMSNorm 4 rows/WG, 64 KB SLM | Launch failure | 0.0989 to 0.1000 ms | 64 KB local tile exceeded the usable SLM budget |
+| Softmax one-shot SLM limit 4096 cols | 16x4097 0.0372 ms | 0.0227 ms after raising the limit to 8192 | 32 KB one-shot tiles launch fine and beat the three-pass tiled path for 4097/8192 |
+| Softmax tiled max pass staged through SLM | 1024x16384 0.6609 ms | 0.5923 to 0.5985 ms with max read directly from global | The max pass never re-reads the row, so SLM staging only adds loads and barriers |
+| Softmax fixed wg128 for short rows | 1024x256 0.0227 ms | 0.0112 to 0.0123 ms with dynamic 16/32/128 threads | Mostly-idle work-groups and group-reduce overhead dominate small shapes |
 
 ## Behavioral Traps
 
@@ -82,6 +87,9 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - oneDNN RMSNorm is a normalization flag, not a separate primitive: use `layer_normalization_forward` with `use_scale | rms_norm` and `forward_inference`, then verify against the CPU reference.
 - Library baselines must pass the same CPU reference. oneDNN `1xK` and a naive oneMKL gemv call both looked plausible but computed the transposed operator for row-major A.
 - When timing a GEMV built from SYCL buffers, the first submission can include host-to-device copies. Allocate device/aligned USM once, warm up, then time the loop.
+- For row-reduction kernels, treat `sycl::reduce_over_group` as a group API: pass `it.get_group()` for a whole work-group or a `sub_group`, never the `nd_item`. This is a compile-time gate, not a tuning choice.
+- `vec<float,16>` fast paths are alignment-sensitive. If the input comes from `std::vector` or a SYCL buffer over host memory, do not assume 64 B alignment; either copy into aligned USM or use the scalar SLM path.
+- oneDNN softmax baselines are shape-dependent: 1024x16384 measured 2.64 ms while 1024x4096 measured 0.217 ms on the same machine. Verify the library result against the CPU reference and re-measure per shape before drawing a conclusion.
 
 ## Diagnostic Traps
 

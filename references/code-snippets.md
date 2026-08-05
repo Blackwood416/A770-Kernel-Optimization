@@ -17,6 +17,7 @@
 - Complete GEMM alpha/beta with runtime dimensions
 - f32 GEMV core (sub-group per row, direct L2)
 - f32 RMSNorm core (SLM row tile)
+- f32 Softmax core (SLM row tile)
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -42,6 +43,8 @@ Every step of the measured ladder in [techniques.md](techniques.md) maps to embe
 | 18 | A SLM relay | [16x16 GEMM core](#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
 
 The f32 RMSNorm ladder lives in [techniques.md](techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); its final kernel is [f32 RMSNorm core](#f32-rmsnorm-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-rmsnorm-baseline).
+
+The f32 Softmax ladder lives in [techniques.md](techniques.md#f32-softmax-ladder); its final kernel is [f32 Softmax core](#f32-softmax-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-softmax-baseline).
 
 ## Naive Baseline
 
@@ -717,6 +720,161 @@ void rmsnorm_fast(queue& q, const float* x, const float* gamma, float* y,
 ```
 
 Requires `cols % (VEC * CHUNKS_PER_THREAD) == 0` (32 for this shape); keep the naive scalar row kernel as a fallback for arbitrary dimensions. Staging gamma in SLM is not useful here because gamma is already read once per row and stays in L2. Replacing the `vec` square accumulator with a scalar `v[e]*v[e]` loop was measured neutral: the compiler already vectorizes it.
+
+## f32 Softmax Core (SLM Row Tile)
+
+Source pattern: `softmax_opt.cpp` from the Softmax-Opti campaign.
+
+Measured 0.107 to 0.109 ms for 1024x4096 f32 on A770; the oneDNN softmax baseline was 0.217 ms. One work-group per row, dynamic work-group size by column count, `vec<float,16>` SLM chunks, one barrier after the SLM load, and `sycl::reduce_over_group(it.get_group(), ...)` for both max and sum.
+
+```cpp
+constexpr std::size_t WG = 128;          // used for cols > 1024
+constexpr std::size_t VEC = 16;
+constexpr std::size_t TILE_CHUNKS = 128; // 2048 floats, 32 KB SLM
+using float16 = sycl::vec<float, VEC>;
+
+template <bool Aligned, int Threads>
+void softmax_slm_impl(sycl::queue& q, const float* x, float* y, int rows,
+                      int cols) {
+    const std::size_t chunks =
+        Aligned ? static_cast<std::size_t>(cols) / VEC
+                : (static_cast<std::size_t>(cols) + VEC - 1) / VEC;
+    q.submit([&](sycl::handler& h) {
+        sycl::local_accessor<float16, 1> tile(sycl::range<1>(chunks), h);
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(rows * Threads),
+                              sycl::range<1>(Threads)),
+            [=](sycl::nd_item<1> it) {
+                const std::size_t row = it.get_group(0);
+                const std::size_t tid = it.get_local_linear_id();
+                const float* row_in = x + row * static_cast<std::size_t>(cols);
+                float* row_out = y + row * static_cast<std::size_t>(cols);
+
+                for (std::size_t c = tid; c < chunks; c += Threads) {
+                    if constexpr (Aligned) {
+                        tile[c] = *reinterpret_cast<const float16*>(
+                            row_in + c * VEC);
+                    } else {
+                        const std::size_t off = c * VEC;
+                        const std::size_t remain =
+                            static_cast<std::size_t>(cols) - off;
+                        float16 v(0.0f);
+                        for (std::size_t e = 0; e < VEC && e < remain; ++e) {
+                            v[e] = row_in[off + e];
+                        }
+                        tile[c] = v;
+                    }
+                }
+                it.barrier(sycl::access::fence_space::local_space);
+
+                float partial_max = -std::numeric_limits<float>::infinity();
+                for (std::size_t c = tid; c < chunks; c += Threads) {
+                    const std::size_t off = c * VEC;
+                    const std::size_t limit =
+                        Aligned ? VEC
+                                : std::min<std::size_t>(
+                                      VEC,
+                                      static_cast<std::size_t>(cols) - off);
+                    for (std::size_t e = 0; e < limit; ++e) {
+                        partial_max = sycl::max(partial_max, tile[c][e]);
+                    }
+                }
+                const float row_max = sycl::reduce_over_group(
+                    it.get_group(), partial_max, sycl::maximum<float>());
+
+                float partial_sum = 0.0f;
+                if constexpr (Aligned) {
+                    float16 sum_vec(0.0f);
+                    for (std::size_t c = tid; c < chunks; c += Threads) {
+                        sum_vec += sycl::exp(tile[c] - row_max);
+                    }
+                    for (std::size_t e = 0; e < VEC; ++e) {
+                        partial_sum += sum_vec[e];
+                    }
+                } else {
+                    for (std::size_t c = tid; c < chunks; c += Threads) {
+                        const std::size_t off = c * VEC;
+                        const std::size_t limit = std::min<std::size_t>(
+                            VEC, static_cast<std::size_t>(cols) - off);
+                        for (std::size_t e = 0; e < limit; ++e) {
+                            partial_sum += sycl::exp(tile[c][e] - row_max);
+                        }
+                    }
+                }
+                const float row_sum = sycl::reduce_over_group(
+                    it.get_group(), partial_sum, sycl::plus<float>());
+                const float inv_sum = 1.0f / row_sum;
+
+                if constexpr (Aligned) {
+                    for (std::size_t c = tid; c < chunks; c += Threads) {
+                        const float16 out =
+                            sycl::exp(tile[c] - row_max) * inv_sum;
+                        *reinterpret_cast<float16*>(row_out + c * VEC) = out;
+                    }
+                } else {
+                    for (std::size_t c = tid; c < chunks; c += Threads) {
+                        const std::size_t off = c * VEC;
+                        if (off < static_cast<std::size_t>(cols)) {
+                            const std::size_t limit = std::min<std::size_t>(
+                                VEC, static_cast<std::size_t>(cols) - off);
+                            for (std::size_t e = 0; e < limit; ++e) {
+                                row_out[off + e] =
+                                    sycl::exp(tile[c][e] - row_max) * inv_sum;
+                            }
+                        }
+                    }
+                }
+            });
+    });
+}
+
+void softmax_slm(sycl::queue& q, const float* x, float* y, int rows,
+                 int cols) {
+    const bool aligned = cols % static_cast<int>(VEC) == 0;
+    const int threads = cols <= 256 ? 16 : (cols <= 1024 ? 32 : 128);
+    // Dispatch the template for aligned/generic x 16/32/128. For cols > 8192
+    // use the tiled variant below instead of the one-shot kernel.
+    if (aligned) {
+        if (threads == 16) {
+            softmax_slm_impl<true, 16>(q, x, y, rows, cols);
+        } else if (threads == 32) {
+            softmax_slm_impl<true, 32>(q, x, y, rows, cols);
+        } else {
+            softmax_slm_impl<true, 128>(q, x, y, rows, cols);
+        }
+    } else {
+        if (threads == 16) {
+            softmax_slm_impl<false, 16>(q, x, y, rows, cols);
+        } else if (threads == 32) {
+            softmax_slm_impl<false, 32>(q, x, y, rows, cols);
+        } else {
+            softmax_slm_impl<false, 128>(q, x, y, rows, cols);
+        }
+    }
+}
+```
+
+Requires 64 B aligned USM pointers for the `Aligned` path (`sycl::aligned_alloc_shared<float>(64, ...)`). The generic `Aligned=false` path handles odd column counts with scalar loads; it still beat the naive row-per-item kernel by a wide margin.
+
+For rows larger than one SLM tile, do not stage the max pass. Reduce it directly from global first, then stage 32 KB tiles only for the sum and normalize passes:
+
+```cpp
+// cols > 8192: same nd_range and SLM tile as above, but the max pass is:
+float partial_max = -std::numeric_limits<float>::infinity();
+for (std::size_t c = tid; c < chunks; c += Threads) {
+    const std::size_t off = c * VEC;
+    const std::size_t limit = std::min<std::size_t>(
+        VEC, static_cast<std::size_t>(cols) - off);
+    for (std::size_t e = 0; e < limit; ++e) {
+        partial_max = sycl::max(partial_max, row_in[off + e]);
+    }
+}
+const float row_max = sycl::reduce_over_group(
+    it.get_group(), partial_max, sycl::maximum<float>());
+// Then for each tile: load into `tile`, barrier, accumulate exp(x - row_max),
+// reduce the sum, and in a second tile pass normalize from SLM with a barrier
+// after each tile store. This reduced 1024x16384 from 0.66 ms to 0.59 ms.
+```
 
 ## Correctness and Timing Harness
 

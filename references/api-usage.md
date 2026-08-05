@@ -7,6 +7,7 @@
 - Kernel structure rules
 - Standard SYCL sub-group kernels
 - oneDNN RMSNorm baseline
+- oneDNN Softmax baseline
 - Build and run commands
 - VTune commands
 - Verification methodology
@@ -101,7 +102,7 @@ h.parallel_for(nd_range<2>(range<2>(SUB, M), range<2>(SUB, SG_PER_WG)),
 
 - Do not hardcode `per_lane` from `N/16`: A770 may compile the kernel with 32-lane sub-groups, which would cover only half of each row. Always derive `per_lane` from `sg.get_local_range()[0]`, or pin the size with `properties{sub_group_size<16>}` and accept that pinning was measured slower for this GEMV.
 - Do not assume the sub-group dimension is local dim 0. On oneAPI 2026.1, a 2D local range `(16, 32)` formed 32-lane sub-groups along dim 1 (`sg.get_group_linear_id()` tracked `lid0`, `sg.get_local_linear_id()` tracked `lid1`). For row-per-work-group kernels, prefer a 1D `nd_range` so sub-groups are contiguous linear blocks, or probe the mapping first.
-- For row-reduction operators (RMSNorm, layer norm), stage the row in SLM and normalize from SLM. Copy-ready pattern: [f32 RMSNorm core](code-snippets.md#f32-rmsnorm-core-slm-row-tile).
+- For row-reduction operators (RMSNorm, layer norm, softmax), stage the row in SLM and normalize from SLM. Copy-ready patterns: [f32 RMSNorm core](code-snippets.md#f32-rmsnorm-core-slm-row-tile) and [f32 Softmax core](code-snippets.md#f32-softmax-core-slm-row-tile). For softmax, shrink the WG size for short rows and keep a scalar generic path for odd column counts.
 - Allocate A/x/y with `sycl::aligned_alloc_device<float>(64, ...)` so 64 B `vec<float,16>` loads are aligned.
 
 ## oneDNN RMSNorm Baseline
@@ -132,6 +133,37 @@ stream.wait();
 ```
 
 Compile with `/EHsc` when using the C++ API exceptions (`icx-cl /fsycl /EHsc ...`). Always verify the oneDNN output against the CPU RMSNorm reference; it measured `errors: 0/4194304` for 1024x4096 f32.
+
+## oneDNN Softmax Baseline
+
+oneDNN 3.11.2 has a dedicated softmax primitive. For row-major f32 `{M, N}` and softmax along the last axis, use `softmax_forward` with `prop_kind::forward_inference`, `algorithm::softmax_accurate`, and `axis=1`. Create the engine and stream from the same SYCL GPU queue and pass shared USM pointers.
+
+```cpp
+dnnl::engine eng = dnnl::sycl_interop::make_engine(
+    q.get_device(), q.get_context());
+dnnl::stream stream = dnnl::sycl_interop::make_stream(eng, q);
+dnnl::memory::desc md({M, N}, dnnl::memory::data_type::f32,
+                      dnnl::memory::format_tag::ab);
+dnnl::softmax_forward::primitive_desc pd(
+    eng, dnnl::prop_kind::forward_inference,
+    dnnl::algorithm::softmax_accurate, md, md, 1);
+dnnl::softmax_forward softmax(pd);
+
+auto src_mem = dnnl::sycl_interop::make_memory(
+    md, eng, dnnl::sycl_interop::memory_kind::usm, x);
+auto dst_mem = dnnl::sycl_interop::make_memory(
+    md, eng, dnnl::sycl_interop::memory_kind::usm, y);
+softmax.execute(stream, {{DNNL_ARG_SRC, src_mem}, {DNNL_ARG_DST, dst_mem}});
+stream.wait();
+```
+
+Compile with `/EHsc` and link `dnnl.lib`:
+
+```bat
+icx-cl /fsycl /EHsc softmax_opt.cpp /I "C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\include" "C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\lib\dnnl.lib" /Fe:softmax_opt.exe
+```
+
+Always verify the oneDNN output against the CPU softmax reference. The 1024x4096 baseline measured 0.217 ms while 1024x16384 measured 2.64 ms, so re-measure the baseline per shape instead of extrapolating.
 
 ## Build and Run Commands
 

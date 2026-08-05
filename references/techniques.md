@@ -8,6 +8,7 @@
 - VTune-driven instruction reduction
 - f32 GEMV ladder and baselines
 - f32 RMSNorm ladder (1024x4096)
+- f32 Softmax ladder
 - Interpreting VTune gpu-hotspots metrics
 
 ## Benchmark Context and Baselines
@@ -149,6 +150,48 @@ VTune sampling inflated wall time by ~50-60x, so use the instruction mix for dia
 - Two barriers instead of three: with one row per WG, every thread can compute `inv_rms = 1/sqrt(row_sum/N + eps)` itself after the reduction barrier; a per-row `inv` local array plus an extra barrier was not needed.
 - A 4-row 64 KB SLM tile failed at launch; 32 KB (2 rows) worked but was slower than 16 KB (1 row). Smaller SLM left more resident work-groups.
 - Staging gamma in SLM is not useful for one row per WG: gamma is already read exactly once per row and stays in L2.
+
+## f32 Softmax Ladder
+
+Measured on Intel Arc A770 with oneAPI 2026.1, USM harness (50 warmup + 500 timed launches, 20 + 100 for cols > 4096, three runs per case, `q.wait()`, CPU float reference, tolerance `1e-5`). All values are 3-run averages and were stable across repeated benchmark invocations.
+
+| Shape | Naive | Final SLM | oneDNN | SLM/oneDNN |
+|---|---:|---:|---:|---:|
+| 16x32 | 0.0224 ms | 0.0066 ms | 0.0116 ms | 0.57 |
+| 16x256 | 0.0886 ms | 0.0061 ms | 0.0140 ms | 0.44 |
+| 16x257 | 0.1707 ms | 0.0114 ms | 0.0184 ms | 0.62 |
+| 16x1024 | 0.3407 ms | 0.0071 ms | 0.0112 ms | 0.63 |
+| 16x1025 | 0.6786 ms | 0.0114 ms | 0.0178 ms | 0.64 |
+| 16x4096 | 1.3922 ms | 0.0085 ms | 0.0147 ms | 0.58 |
+| 16x4097 | 3.1981 ms | 0.0228 ms | 0.0229 ms | 1.00 |
+| 1024x256 | 0.2267 ms | 0.0112 ms | 0.0170 ms | 0.66 |
+| 1024x1024 | 0.8910 ms | 0.0345 ms | 0.0489 ms | 0.70 |
+| 1024x4096 | 5.5716 ms | 0.1088 ms | 0.2169 ms | 0.50 |
+| 1024x8192 | 11.7098 ms | 0.2113 ms | 0.4191 ms | 0.50 |
+| 1024x16384 | 26.7873 ms | 0.5923 ms | 2.6444 ms | 0.22 |
+
+The measured standard-SYCL ladder on the 1024x4096 shape:
+
+| Step | Technique | Best avg per run | Notes |
+|---|---:|---|---|
+| 1 | Naive row per work-item, scalar loop | 5.55 ms | One work-item walks a full row; 1024 rows underutilize 4096 threads |
+| 2 | One-shot SLM row tile, wg128 | 0.1125 ms | One global read, max + sum + normalize all served from SLM |
+| 3 | + one-shot limit raised to 8192 cols (32 KB SLM) | 0.1125 ms (4096), 0.2113 ms (8192) | 16x4097 dropped from 0.037 ms tiled to 0.023 ms |
+| 4 | + `vec16` exp accumulator and vector stores | 0.1074 ms | Fewer exp/ALU/store instructions; unlike RMSNorm, this was a small positive |
+| 5 | + dynamic WG size by cols (16/32/128 threads) | 0.1088 ms | Fixed idle-thread waste on short rows; 1024x256 dropped from 0.0227 ms to 0.0112 ms |
+
+Same-operation oneDNN baseline: `softmax_forward` with `algorithm::softmax_accurate`, `axis=1`, GPU engine, shared USM pointers. The final SYCL kernel is about 2x faster at 1024x4096 and up to about 4.5x faster at 1024x16384. The 1024x16384 oneDNN path measured 2.64 ms, far above its smaller-shape trend; always re-measure the oneDNN baseline per shape.
+
+Generic column counts (257, 1025, 4097) use a scalar-load SLM path because `vec<float,16>` needs 64 B alignment; correctness stayed within `1e-5` and the times stayed close to oneDNN instead of falling back to the naive kernel.
+
+### Why the Softmax steps work
+
+- One work-group per row plus SLM staging gives softmax the same one-global-read property as RMSNorm: max and sum reductions plus the normalize pass all re-read the row from SLM.
+- `sycl::reduce_over_group(it.get_group(), ...)` returns the reduction to every thread, so the one-shot kernel needs only one explicit barrier (after the SLM load); the group reductions provide the remaining synchronization.
+- A 32 KB SLM tile (8192 floats) launches fine on A770 and beat the 32 KB-per-tile three-pass tiled variant for 4097 and 8192 columns; the earlier 4096-column threshold was too conservative.
+- For rows that exceed one SLM tile, keep the max pass out of SLM entirely: threads read global chunks directly and reduce, then tiles are staged only for sum and normalize. That reduces global row reads from three to two and cut 1024x16384 from 0.66 ms to 0.59 ms.
+- Dynamic work-group sizing matters most below 1024 columns. 16 threads for cols <= 256, 32 for cols <= 1024, and 128 otherwise removed mostly-idle work-groups; do not ship a fixed 128-thread kernel for every shape without checking small-row shapes.
+- Alignment is a correctness gate for the vector fast path: allocate input/output with `sycl::aligned_alloc_shared<float>(64, ...)`. For arbitrary odd column counts, the generic scalar SLM path is still much faster than the naive row-per-item kernel.
 
 ## Interpreting VTune gpu-hotspots Metrics
 
