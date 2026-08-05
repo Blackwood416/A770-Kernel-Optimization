@@ -16,6 +16,7 @@
 - Fewer barriers: 4-buffer B pipeline
 - Complete GEMM alpha/beta with runtime dimensions
 - f32 GEMV core (sub-group per row, direct L2)
+- f32 RMSNorm core (SLM row tile)
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -39,6 +40,8 @@ Every step of the measured ladder in [techniques.md](techniques.md) maps to embe
 | 16 | host-side operand layout | [A operand-layout packing](#host-side-a-operand-layout-packing-esimd-16x16) + [16x16 GEMM core](#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
 | 17 | address slimming + 4-buffer B | [4-buffer B pipeline](#fewer-barriers-4-buffer-b-pipeline) |
 | 18 | A SLM relay | [16x16 GEMM core](#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
+
+The f32 RMSNorm ladder lives in [techniques.md](techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); its final kernel is [f32 RMSNorm core](#f32-rmsnorm-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-rmsnorm-baseline).
 
 ## Naive Baseline
 
@@ -637,6 +640,83 @@ void gemv_fast(queue& q, float* a, float* x, float* y,
 ```
 
 This kernel requires `M % SG_PER_WG == 0` and `N % (VEC * SG_PER_WG) == 0`; keep the naive scalar row kernel as a fallback for arbitrary dimensions. Do not use oneDNN `1xK` matmul as the GEMV baseline: it computes `x*A`, which is `A^T*x` for row-major A.
+
+## f32 RMSNorm Core (SLM Row Tile)
+
+Source pattern: `rmsnorm.cpp` from the RMSNorm-Opti campaign.
+
+Measured 0.09797 to 0.1000 ms for 1024x4096 f32 on A770; the oneDNN RMSNorm baseline was 0.1235 to 0.1242 ms. One work-group per row, 128 threads, 2 barriers, x read from global once and normalized from SLM.
+
+```cpp
+constexpr size_t WG_THREADS = 128;
+constexpr size_t VEC = 16;
+constexpr size_t CHUNKS_PER_ROW = 256;  // 4096 / 16
+constexpr size_t CHUNKS_PER_THREAD = 2; // 128 * 2 = 256 chunks
+
+void rmsnorm_fast(queue& q, const float* x, const float* gamma, float* y,
+                  size_t rows, size_t cols, float eps) {
+    q.submit([&](handler& h) {
+        local_accessor<vec<float, VEC>, 2> tile(
+            range<2>(1, CHUNKS_PER_ROW), h);
+        local_accessor<float, 1> row_sum(range<1>(1), h);
+
+        h.parallel_for(nd_range<1>(range<1>(rows * WG_THREADS),
+                                   range<1>(WG_THREADS)),
+                       [=](nd_item<1> it) {
+            const size_t tid = it.get_local_linear_id();
+            const size_t row = it.get_group(0);
+            auto sg = it.get_sub_group();
+
+            if (tid == 0) row_sum[0] = 0.0f;
+
+            for (size_t p = 0; p < CHUNKS_PER_THREAD; ++p) {
+                const size_t cv =
+                    (tid * CHUNKS_PER_THREAD + p) % CHUNKS_PER_ROW;
+                tile[0][cv] =
+                    *reinterpret_cast<const vec<float, VEC>*>(
+                        x + row * cols + cv * VEC);
+            }
+
+            it.barrier(access::fence_space::local_space);
+
+            vec<float, VEC> acc(0.0f);
+            for (size_t p = 0; p < CHUNKS_PER_THREAD; ++p) {
+                const size_t cv =
+                    (tid * CHUNKS_PER_THREAD + p) % CHUNKS_PER_ROW;
+                acc += tile[0][cv] * tile[0][cv];
+            }
+            float partial = 0.0f;
+            for (size_t e = 0; e < VEC; ++e) partial += acc[e];
+            const float psum =
+                reduce_over_group(sg, partial, plus<float>());
+            if (sg.get_local_linear_id() == 0) {
+                atomic_ref<float, memory_order::relaxed,
+                           memory_scope::work_group,
+                           access::address_space::local_space>
+                    ref(row_sum[0]);
+                ref.fetch_add(psum);
+            }
+
+            it.barrier(access::fence_space::local_space);
+
+            const float inv_rms =
+                1.0f / sqrt(row_sum[0] / static_cast<float>(cols) + eps);
+
+            for (size_t p = 0; p < CHUNKS_PER_THREAD; ++p) {
+                const size_t cv =
+                    (tid * CHUNKS_PER_THREAD + p) % CHUNKS_PER_ROW;
+                const auto g =
+                    *reinterpret_cast<const vec<float, VEC>*>(gamma + cv * VEC);
+                *reinterpret_cast<vec<float, VEC>*>(
+                    y + row * cols + cv * VEC) =
+                    tile[0][cv] * (inv_rms * g);
+            }
+        });
+    });
+}
+```
+
+Requires `cols % (VEC * CHUNKS_PER_THREAD) == 0` (32 for this shape); keep the naive scalar row kernel as a fallback for arbitrary dimensions. Staging gamma in SLM is not useful here because gamma is already read once per row and stays in L2. Replacing the `vec` square accumulator with a scalar `v[e]*v[e]` loop was measured neutral: the compiler already vectorizes it.
 
 ## Correctness and Timing Harness
 

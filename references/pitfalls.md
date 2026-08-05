@@ -23,6 +23,9 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](code
 | A `block_load` L1/L2 cache hint | Neutral | 0.0641 to 0.0659 ms vs 0.0632 to 0.0646 ms |
 | `esimd::reduce(v, std::plus<float>{})` | Compiles, silently returns 0 | `reduce` only matches `std::plus<>`/`std::multiplies<>`; the typed functor hits an empty branch |
 | Default sub-group size | Not fixed | A770 reports 8/16/32; a GEMV written for 16 lanes produced half sums when the compiler picked 32 |
+| 2D sub-group mapping | Not along local dim 0 | oneAPI 2026.1 probe with local `(16,32)`: 32-lane sub-groups ran along dim 1 (`sg_gid` tracked `lid0`, `sg_lid` tracked `lid1`); use a 1D `nd_range` or probe the mapping |
+| 64 KB SLM tile | Launch failure | 4 x 4096 float `local_accessor` (65536 B) exited with no diagnostic on A770; keep tiles at 32-48 KB |
+| `group_barrier(it, fence_space)` | Compile error | oneAPI 2026.1 expects a `memory_scope`; use `it.barrier(access::fence_space::local_space)` |
 | ESIMD SLM/`block_store` experiments (driver 32.0.101.8724) | Full system reboot | Bugcheck `0x00000116` VIDEO_TDR_FAILURE at 20:58:56; minidump `080526-7171-01.dmp` |
 | oneDNN matmul `1xK` as a GEMV baseline | Wrong operator | Computes `x*A` (`A^T*x`); max_err 326 vs the CPU reference, so the 0.182 ms number is not comparable |
 
@@ -57,6 +60,13 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 | GEMV pointer hoisting | 0.258 to 0.323 ms | 0.215 ms index-math kernel | Compiler already converts `row*N+col` into increments; explicit hoisting added register pressure |
 | GEMV `vec16` group reduce | 0.227 ms | 0.215 ms scalar `reduce_over_group` | No reduction win for one scalar per row |
 | GEMV ESIMD full-row-per-lane + SLM partial exchange | TDR / reboot | - | Not isolated to a single API; abandoned after bugcheck 0x116 |
+| RMSNorm direct L2 re-read | 0.153 to 0.157 ms | 0.0989 to 0.1000 ms SLM row tile | Each row is read twice; nominally-fitting 16 MB L2 did not save the second read |
+| RMSNorm 2 rows/WG, wg512 | 0.108 to 0.110 ms | 0.0989 to 0.1000 ms | More SLM and barriers per work-group |
+| RMSNorm 2 rows/WG, wg256 | 0.105 to 0.106 ms | 0.0989 to 0.1000 ms | Still slower than one row per wg128 |
+| RMSNorm 1 row/WG, wg64 | 0.108 ms | 0.0989 to 0.1000 ms wg128 | Too little work per work-group |
+| RMSNorm 1 row/WG, wg256 (2 barriers) | 0.1005 to 0.1029 ms | 0.0989 to 0.1000 ms wg128 | Larger work-group reduced residency |
+| RMSNorm `vec16` square accumulator | 0.100 to 0.101 ms | 0.0989 to 0.1000 ms scalar loop | Neutral; compiler already vectorized the scalar loop |
+| RMSNorm 4 rows/WG, 64 KB SLM | Launch failure | 0.0989 to 0.1000 ms | 64 KB local tile exceeded the usable SLM budget |
 
 ## Behavioral Traps
 
@@ -68,6 +78,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - Large GRF advice from official guides targets PVC (8x16x16, 32x64x16 blocks) and does not transfer to DG2.
 - `esimd::reduce` must receive `std::plus<>{}` or `std::multiplies<>{}`; a typed functor such as `std::plus<float>{}` compiles and returns the default value, which looked like broken ESIMD stores until the reduction was fixed.
 - Sub-group size is a correctness parameter, not just a tuning parameter. Query `sgrp.get_local_range()[0]` and derive per-lane loop bounds, or verify that the assumed size matches the compiled kernel.
+- Initialize every local reduction accumulator before `atomic_ref::fetch_add`. An uninitialized RMSNorm `local_accessor` row-sum array produced `max_err ~1.48` and failed every element; the kernel otherwise looked correct.
+- oneDNN RMSNorm is a normalization flag, not a separate primitive: use `layer_normalization_forward` with `use_scale | rms_norm` and `forward_inference`, then verify against the CPU reference.
 - Library baselines must pass the same CPU reference. oneDNN `1xK` and a naive oneMKL gemv call both looked plausible but computed the transposed operator for row-major A.
 - When timing a GEMV built from SYCL buffers, the first submission can include host-to-device copies. Allocate device/aligned USM once, warm up, then time the loop.
 
@@ -76,3 +88,4 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - VTune `full-compute` fails with "Allow multiple runs" unless you pass `-allow-multiple-runs`; `instruction-count` does not need it.
 - Without admin rights, VTune lacks EU-level detail (occupancy, barrier stalls); still useful for instruction-count and launch overhead.
 - Wall clock and kernel time differ: our best kernel had about 1.7 us launch gap, already better than oneDNN's 4.3 us. Optimize launch only after measuring it.
+- VTune `instruction-count` sampling inflated RMSNorm wall time by ~50-60x (0.154 ms to ~10 ms). Compare instruction mixes between variants, not profiled milliseconds.

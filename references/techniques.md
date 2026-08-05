@@ -7,6 +7,7 @@
 - Why each step works
 - VTune-driven instruction reduction
 - f32 GEMV ladder and baselines
+- f32 RMSNorm ladder (1024x4096)
 - Interpreting VTune gpu-hotspots metrics
 
 ## Benchmark Context and Baselines
@@ -114,6 +115,40 @@ Copy-ready kernel and fallback rule: [f32 GEMV core](code-snippets.md#f32-gemv-c
 - Staging x in SLM is not needed for this shape: x is 16 KB, L1/L2 hold it while A is streamed once, and the SLM copy adds a barrier and extra instructions.
 - Hardcoding 16 lanes is a correctness trap. A770 reports sub-group sizes 8/16/32 and the compiler picked 32 for the fastest kernels; a kernel written for 16 lanes then computed only half of each row (`max_err` about half the reference magnitude). Derive `per_lane = (N / VEC) / sgrp.get_local_range()[0]` instead. Forcing `sub_group_size<16>` was correct but slower (about 0.258 ms for the pointer-hoisted variant).
 - Pointer hoisting and explicit two-accumulator unrolling were slower (0.258 to 0.323 ms), so the compiler was already turning `a + row*N + col` into incrementing addresses. VTune showed the cost is FMA plus reduction, not address math.
+
+## f32 RMSNorm Ladder (1024x4096, row-major x, f32)
+
+Measured on Intel Arc A770 with oneAPI 2026.1, USM harness (100 warmup + 1000 timed launches per run, three runs, `q.wait()`, CPU float reference, absolute tolerance `1e-4`). All values are stable across three runs.
+
+| Step | Technique | Best avg per run | Notes |
+|---|---:|---|---|
+| 1 | Naive row per work-item, scalar loop | 5.382 ms | One work-item serially walks 4096 cols; 1024 rows underutilize 4096 threads |
+| 2 | Sub-group per row, `vec16`, direct L2 re-read | 0.153 to 0.157 ms | Fused sum + normalize in one launch; each row is read from global twice |
+| 3 | SLM row tile, 2 rows/WG, wg512 | 0.108 to 0.110 ms | x read from global once, normalized from SLM; gamma stays in L2 |
+| 4 | SLM row tile, 2 rows/WG, wg256 | 0.105 to 0.106 ms | More 64 B chunks per thread than wg512 |
+| 5 | SLM row tile, 1 row/WG, wg256 | 0.102 to 0.103 ms | 16 KB SLM/WG leaves more residency |
+| 6 | SLM row tile, 1 row/WG, wg128 | 0.100 to 0.101 ms | Best geometry: 4 sub-groups, 2 chunks per thread |
+| 7 | + remove `inv` local array and third barrier | 0.0989 to 0.1000 ms | Final champion; best measured 0.09797 ms |
+| 8 | + `vec16` accumulator instead of scalar `v[e]*v[e]` loop | 0.100 to 0.101 ms | Neutral; compiler already vectorized step 7 |
+
+Same-operation baseline: oneDNN `layer_normalization_forward` with `normalization_flags::use_scale | normalization_flags::rms_norm`, `prop_kind::forward_inference`, GPU engine, shared USM pointers: 0.1235 to 0.1242 ms, `errors: 0/4194304`, `max_abs_err=7.15e-07`. The final SYCL kernel is about 1.25x faster than oneDNN.
+
+VTune instruction-count comparison (per kernel):
+
+| Variant | Total instructions | Send | Int32 & SP Float | Notes |
+|---|---:|---:|---:|---|
+| Step 2 (direct L2 re-read) | 4.03M | 526K | 2.76M | Two global reads of x plus address math |
+| Step 7 (SLM row tile) | 2.60M | 493K | 1.49M | One global read of x; SIMD utilization 92.8% |
+
+VTune sampling inflated wall time by ~50-60x, so use the instruction mix for diagnosis, not the profiled run times.
+
+### Why the RMSNorm steps work
+
+- One work-group per row with 128 threads keeps all sub-groups on the same row, so sub-group size and 2D mapping cannot break correctness. Each thread handles two `vec<float,16>` chunks (128 B) of the 16 KB row.
+- SLM staging removes the second global read of x. The direct L2 re-read variant was ~55% slower even though 16 MB of x nominally fits L2.
+- Two barriers instead of three: with one row per WG, every thread can compute `inv_rms = 1/sqrt(row_sum/N + eps)` itself after the reduction barrier; a per-row `inv` local array plus an extra barrier was not needed.
+- A 4-row 64 KB SLM tile failed at launch; 32 KB (2 rows) worked but was slower than 16 KB (1 row). Smaller SLM left more resident work-groups.
+- Staging gamma in SLM is not useful for one row per WG: gamma is already read exactly once per row and stays in L2.
 
 ## Interpreting VTune gpu-hotspots Metrics
 
