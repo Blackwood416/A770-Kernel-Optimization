@@ -6,6 +6,7 @@
 - The full ladder with measured numbers
 - Why each step works
 - VTune-driven instruction reduction
+- f32 GEMV ladder and baselines
 - Interpreting VTune gpu-hotspots metrics
 
 ## Benchmark Context and Baselines
@@ -91,6 +92,28 @@ The instruction-count profile of the ESIMD 16x16 kernel showed Send 29.0%, Int32
 The v8b case is the key counterexample: instruction count went up 26% but time went down because global traffic and latency dropped. Judge a change by wall time plus the profile, not by instruction count alone.
 
 Code: [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads), [host-side-a-operand-layout-packing-esimd-16x16](code-snippets.md#host-side-a-operand-layout-packing-esimd-16x16).
+
+## f32 GEMV Ladder (4096x4096, row-major A)
+
+Measured on Intel Arc A770 with the same USM harness (50 warmup + 500 timed launches, `q.wait()`, CPU float reference, relative tolerance `1e-4 * (1 + max|ref|)`). All values are stable across three runs.
+
+| Step | Technique | Per-run | Notes |
+|---|---:|---|---|
+| 1 | Naive row per work-item, scalar loop | 2.65 ms | Buffer-based first run includes host transfer; use USM for steady-state timing |
+| 2 | `vec<float,16>` row + x staged in SLM | 0.50 ms | Vectorization helps; SLM still has staging overhead |
+| 3 | One row per sub-group + x in SLM | 0.24 ms | 16 lanes cooperate on one row |
+| 4 | One row per sub-group + x direct from L2 | 0.215 ms | Best measured standard-SYCL variant |
+
+Library baselines for the same `y = A*x` operator: oneMKL GPU gemv 0.329 ms, oneDNN GPU matmul `Kx1` 0.380 ms. oneDNN matmul `1xK` measured 0.182 ms but computes `x*A`, which is `A^T*x` for the row-major input, and failed the reference check; always verify the library result before trusting a baseline.
+
+Copy-ready kernel and fallback rule: [f32 GEMV core](code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
+
+### Why the GEMV steps work
+
+- Sub-group-per-row changes the A access pattern from one thread walking a full 16 KB row to 16/32 lanes covering one row in contiguous 1 KB/512 B chunks, which reduces load instruction count and improves memory-level parallelism.
+- Staging x in SLM is not needed for this shape: x is 16 KB, L1/L2 hold it while A is streamed once, and the SLM copy adds a barrier and extra instructions.
+- Hardcoding 16 lanes is a correctness trap. A770 reports sub-group sizes 8/16/32 and the compiler picked 32 for the fastest kernels; a kernel written for 16 lanes then computed only half of each row (`max_err` about half the reference magnitude). Derive `per_lane = (N / VEC) / sgrp.get_local_range()[0]` instead. Forcing `sub_group_size<16>` was correct but slower (about 0.258 ms for the pointer-hoisted variant).
+- Pointer hoisting and explicit two-accumulator unrolling were slower (0.258 to 0.323 ms), so the compiler was already turning `a + row*N + col` into incrementing addresses. VTune showed the cost is FMA plus reduction, not address math.
 
 ## Interpreting VTune gpu-hotspots Metrics
 

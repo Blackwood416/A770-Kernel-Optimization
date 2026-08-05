@@ -15,6 +15,7 @@
 - ESIMD 16x16 GEMM core (A/B SLM relay, zero-select loads)
 - Fewer barriers: 4-buffer B pipeline
 - Complete GEMM alpha/beta with runtime dimensions
+- f32 GEMV core (sub-group per row, direct L2)
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -592,6 +593,50 @@ if constexpr (Plain) {
     }
 }
 ```
+
+## f32 GEMV Core (Sub-Group Per Row, Direct L2)
+
+Source pattern: `gemv.cpp` from the GEMV-Opti campaign.
+
+Measured 0.215 ms for `y = A*x`, `4096x4096`, row-major f32 A on A770; the same-operation baselines were oneMKL GPU gemv 0.329 ms and oneDNN GPU matmul `Kx1` 0.380 ms. Keep the per-lane trip count dynamic because the compiler may select 32-lane sub-groups.
+
+```cpp
+constexpr size_t SUB = 16;       // local dimension 0
+constexpr size_t SG_PER_WG = 32; // local dimension 1; 512 threads/WG
+constexpr size_t VEC = 16;
+
+void gemv_fast(queue& q, float* a, float* x, float* y,
+               size_t M, size_t N) {
+    const size_t nvec = N / VEC;
+    q.submit([&](handler& h) {
+        h.parallel_for(
+            nd_range<2>(range<2>(SUB, M), range<2>(SUB, SG_PER_WG)),
+            [=](nd_item<2> it) {
+                auto sg = it.get_sub_group();
+                const size_t lane = sg.get_local_linear_id();
+                const size_t sg_id = sg.get_group_linear_id();
+                const size_t sg_size = sg.get_local_range()[0];
+                const size_t per_lane = nvec / sg_size;
+                const size_t row = it.get_group(1) * SG_PER_WG + sg_id;
+
+                vec<float, VEC> acc(0.0f);
+                for (size_t k = 0; k < per_lane; ++k) {
+                    const size_t col = (lane * per_lane + k) * VEC;
+                    acc += *reinterpret_cast<const vec<float, VEC>*>(
+                               a + row * N + col) *
+                           *reinterpret_cast<const vec<float, VEC>*>(x + col);
+                }
+                float sum = 0.0f;
+                for (size_t e = 0; e < VEC; ++e) sum += acc[e];
+                const float s =
+                    reduce_over_group(sg, sum, plus<float>());
+                if (lane == 0) y[row] = s;
+            });
+    });
+}
+```
+
+This kernel requires `M % SG_PER_WG == 0` and `N % (VEC * SG_PER_WG) == 0`; keep the naive scalar row kernel as a fallback for arbitrary dimensions. Do not use oneDNN `1xK` matmul as the GEMV baseline: it computes `x*A`, which is `A^T*x` for row-major A.
 
 ## Correctness and Timing Harness
 

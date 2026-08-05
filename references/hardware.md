@@ -5,6 +5,7 @@
 - Specs
 - DPAS / XMX constraints
 - Memory system constraints
+- GEMV notes
 - Occupancy math and measured sweet spots
 - oneDNN fastest path decode
 
@@ -17,6 +18,7 @@
 | Hardware threads per vector engine (large GRF) | 4 | Large GRF halves occupancy |
 | GRF per thread | 128 regular / 256 large | Keep register budget with headroom; 64/128 was the 16x16 GEMM sweet spot |
 | Register width | 256 bits (32 B) | A float 8x8 accumulator is 256 B = 8 GRF |
+| Sub-group sizes | 8, 16, 32 reported by `info::device::sub_group_sizes` | The compiler can pick 32 even for a kernel written with a local dimension of 16 |
 | L1 per Xe-core | 192 KB | On-chip reuse hierarchy starts here |
 | SLM per Xe-core | 128 KB | Shared local memory pool |
 | Max SLM per work-group | 64 KB | Hard per-WG cap |
@@ -38,6 +40,13 @@
 - `load_2d` / `prefetch_2d`: PVC-only. A770 hangs; bf16 `Transposed` is rejected at compile time (only u32/u64).
 - `named_barrier`: PVC-only.
 - L2 is 16 MB. Use walk order (N-first) so adjacent work-groups share A/B tiles already in L2.
+
+## GEMV Notes (f32, 4096x4096, row-major A)
+
+- GEMV is memory-bound on A770: 64 MB of A plus a 16 KB x vector per launch. x fits in L2 and L1, so a cooperative SLM relay of x was slightly negative (0.229 ms vs 0.215 ms for direct L2 reads).
+- Best measured standard-SYCL structure: 2D `nd_range`, one row per sub-group, `vec<float,16>` loads, per-lane trip count derived from the actual sub-group size, scalar `reduce_over_group`, 512-thread work-groups. Stable at about 0.215 ms.
+- Same-operation library baselines on the same machine: oneMKL GPU gemv 0.329 ms, oneDNN GPU matmul `Kx1` 0.380 ms. oneDNN `1xK` at 0.182 ms is `x*A` (`A^T*x`), not row-major `A*x`, and its output did not match the reference.
+- VTune instruction-count mix for the 0.215 ms kernel: about 3.9M instructions/kernel, Int32/SP Float 61%, Other 18.8%, Send 13.7%, Control Flow 4.5%, Synchronization 1.7%, SIMD utilization 96.9%. The remaining cost is vector FMA plus reduction, not global bandwidth or address math.
 
 ## Occupancy Math and Measured Sweet Spots
 
