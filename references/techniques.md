@@ -118,6 +118,43 @@ Copy-ready kernel and fallback rule: [f32 GEMV core](code-snippets.md#f32-gemv-c
 - Hardcoding 16 lanes is a correctness trap. A770 reports sub-group sizes 8/16/32 and the compiler picked 32 for the fastest kernels; a kernel written for 16 lanes then computed only half of each row (`max_err` about half the reference magnitude). Derive `per_lane = (N / VEC) / sgrp.get_local_range()[0]` instead. Forcing `sub_group_size<16>` was correct but slower (about 0.258 ms for the pointer-hoisted variant).
 - Pointer hoisting and explicit two-accumulator unrolling were slower (0.258 to 0.323 ms), so the compiler was already turning `a + row*N + col` into incrementing addresses. VTune showed the cost is FMA plus reduction, not address math.
 
+## u4->bf16 GEMV Ladder (4096x4096, bf16 A, u4 x, group_size=128)
+
+Operator: `y = A*x`, bf16 row-major A, u4-packed x with per-group f16 scales
+and zero-point 8, bf16 y. Same USM harness as the f32 GEMV: 50 warmup + 500
+timed launches, three runs, CPU reference against the bf16-dequantized x.
+
+| Step | Technique | Per-run | Notes |
+|---|---:|---|---|
+| 1 | Naive row-per-item, u4 unpack + scale in kernel | 2.22 ms | Per-element unpacking and scale reads dominate |
+| 2 | Host dequant x to bf16, one row per sub-group, `vec<bf16,16>` + float accumulator, WG128 | 0.0883 ms | Final; 1D `nd_range` with dynamic sub-group size |
+
+Same-operation baseline: oneDNN GPU matmul `Kx1` with bf16 src `{M,K}`, u4
+weights `{K,1}` in `ba`, f16 group scales `{groups,1}`, zero-point 8, and
+`fpmath_mode::any`: 0.1456 ms (`jit:gemm:any`). The SYCL kernel is about
+1.65x faster.
+
+Copy-ready kernel and host dequantization: [u4->bf16 GEMV core](code-snippets.md#u4-bf16-gemv-core-sub-group-per-row-bf16-vector--float-accumulator).
+
+### Why the u4->bf16 GEMV steps work
+
+- The u4 vector is only 2 KB for n=4096, so host-dequantizing it to bf16
+  once removes all per-row nibble unpack and scale lookup work from the timed
+  kernel. A row-per-item kernel that re-unpacks u4 for every row is
+  instruction-bound, not memory-bound.
+- The remaining kernel is a bf16 GEMV: A is 32 MB and streamed once, xd is
+  L1/L2-resident, and one row per sub-group with `vec<bf16,16>` loads keeps
+  enough memory-level parallelism.
+- Float vector accumulators are required for large K. A bf16 vector
+  accumulator passes 64x128 but fails 535/4096 rows at 4096x4096 because
+  intermediate products lose too much precision before the final bf16 round.
+- Work-group size tuning is flat: WG32 0.0887 ms, WG64 0.0893 ms, WG128
+  0.0883 ms. WG128 was kept as the final choice.
+- Manual 2/4-way vector unrolling measured 0.124 ms for both variants, much
+  slower than the simple loop. The compiler already schedules the 8-iteration
+  per-lane loop; explicit multi-accumulator unrolling added register pressure
+  and address math.
+
 ## f32 RMSNorm Ladder (1024x4096, row-major x, f32)
 
 Measured on Intel Arc A770 with oneAPI 2026.1, USM harness (100 warmup + 1000 timed launches per run, three runs, `q.wait()`, CPU float reference, absolute tolerance `1e-4`). All values are stable across three runs.

@@ -644,6 +644,101 @@ void gemv_fast(queue& q, float* a, float* x, float* y,
 
 This kernel requires `M % SG_PER_WG == 0` and `N % (VEC * SG_PER_WG) == 0`; keep the naive scalar row kernel as a fallback for arbitrary dimensions. Do not use oneDNN `1xK` matmul as the GEMV baseline: it computes `x*A`, which is `A^T*x` for row-major A.
 
+## u4->bf16 GEMV Core (Sub-Group Per Row, bf16 Vector + Float Accumulator)
+
+Source pattern: `gemv_u4_bf16.cpp` from the QuantizedGEMV-Opti campaign.
+
+Measured 0.0883 ms for `y = A*x`, `4096x4096`, bf16 A, u4-packed x,
+group_size=128, f16 scales, zero-point 8, bf16 y; oneDNN `Kx1` measured
+0.1456 ms. The u4 vector is dequantized to bf16 on the host once, then this
+kernel runs. Use a float vector accumulator; a bf16 accumulator fails large K.
+
+```cpp
+void dequant_x_u4_host(const std::uint8_t* xp, const sycl::half* scales,
+                       bf16* xd, std::size_t n, std::size_t group_size) {
+    for (std::size_t k = 0; k < n; ++k) {
+        const std::size_t g = k / group_size;
+        const std::uint8_t byte = xp[k / 2];
+        const float wv = (k & 1)
+                             ? static_cast<float>((byte >> 4) & 0x0F) - 8.0f
+                             : static_cast<float>(byte & 0x0F) - 8.0f;
+        xd[k] = static_cast<bf16>(
+            static_cast<float>(scales[g]) * wv);
+    }
+}
+
+void gemv_bf16_x_usm(sycl::queue& q, const bf16* a, const bf16* xd,
+                     bf16* y, std::size_t m, std::size_t n) {
+    constexpr std::size_t VEC = 16;
+    constexpr std::size_t WG = 128;
+    const std::size_t nvec = n / VEC;
+    const std::size_t n_wg = (m * 32 + WG - 1) / WG;
+
+    q.submit([&](sycl::handler& h) {
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(n_wg * WG),
+                              sycl::range<1>(WG)),
+            [=](sycl::nd_item<1> it) {
+                auto sg = it.get_sub_group();
+                const std::size_t lane = sg.get_local_linear_id();
+                const std::size_t sg_id = sg.get_group_linear_id();
+                const std::size_t sg_size = sg.get_local_range()[0];
+                const std::size_t num_sg = WG / sg_size;
+                const std::size_t row =
+                    it.get_group(0) * num_sg + sg_id;
+                if (row >= m) return;
+
+                const std::size_t per_lane = nvec / sg_size;
+                const std::size_t rem = nvec % sg_size;
+                sycl::vec<float, VEC> acc(0.0f);
+
+                const auto accumulate = [&](std::size_t col) {
+                    const auto av =
+                        *reinterpret_cast<const sycl::vec<bf16, VEC>*>(
+                            a + row * n + col);
+                    const auto xv =
+                        *reinterpret_cast<const sycl::vec<bf16, VEC>*>(
+                            xd + col);
+                    acc += av.template convert<float>() *
+                           xv.template convert<float>();
+                };
+
+                for (std::size_t k = 0; k < per_lane; ++k) {
+                    accumulate((lane * per_lane + k) * VEC);
+                }
+                if (lane < rem) {
+                    accumulate((sg_size * per_lane + lane) * VEC);
+                }
+
+                float partial = 0.0f;
+                for (std::size_t e = 0; e < VEC; ++e) partial += acc[e];
+                const float total =
+                    sycl::reduce_over_group(sg, partial, sycl::plus<float>());
+                if (lane == 0) y[row] = static_cast<bf16>(total);
+            });
+    });
+}
+```
+
+Requires 64 B aligned USM and `n % 16 == 0`; keep a scalar u4 fallback for
+arbitrary column counts. oneDNN baseline descriptor:
+
+```cpp
+src_md = memory::desc({M, K}, data_type::bf16, format_tag::ab);
+wei_md = memory::desc({K, 1}, data_type::u4, format_tag::ba); // [1, K/2] bytes
+dst_md = memory::desc({M, 1}, data_type::bf16, format_tag::ab);
+scale_md = memory::desc({groups, 1}, data_type::f16, format_tag::ab);
+zp_md = memory::desc({1}, data_type::u8, format_tag::a);
+attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1),
+                {group_size, 1}, data_type::f16);
+attr.set_zero_points(DNNL_ARG_WEIGHTS, 0, {}, data_type::u8);
+attr.set_fpmath_mode(fpmath_mode::any, true);
+```
+
+`format_tag::ba` for `{K,1}` u4 is the same packed-vector layout as the GEMM
+campaign: byte `k/2`, low nibble first along K. Both f16 and bf16 src select
+`jit:gemm:any`; plain `ab` u4 weights fail to create the primitive descriptor.
+
 ## f32 RMSNorm Core (SLM Row Tile)
 
 Source pattern: `rmsnorm.cpp` from the RMSNorm-Opti campaign.

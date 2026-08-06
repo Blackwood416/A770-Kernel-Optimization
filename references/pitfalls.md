@@ -32,6 +32,7 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](code
 | `vec<float,16>` on `std::vector`/buffer host memory | Alignment risk | 64 B loads need aligned USM; use `sycl::aligned_alloc_shared/device<float>(64, ...)` on the fast path and a scalar generic path for odd columns |
 | oneDNN u4 matmul, `ab` weights, no scales | `ocl:ref:any` ~110 ms | Plain `ab` u4 did not select a GPU JIT path for f16/u4/bf16 on oneAPI 2026.1 |
 | oneDNN u4 matmul, `ba` weights + scales | `jit:gemm:any` 0.033 to 0.034 ms | `ba` (`[N, K/2]`) + per-group f16 scales + zero-point 8 + `fpmath_mode::any` selects the fast path |
+| oneDNN u4 GEMV, `Kx1` + `ba` weights + scales | `jit:gemm:any` 0.1456 ms | `{K,1}` u4 `ba` (`[1, K/2]`) + `{groups,1}` f16 scales + zp8 works; plain `ab` fails to create the primitive descriptor |
 | SYCL `dpas` mixed f16/u4 | Compile-time rejected | The fp16/bf16 branch asserts `APrecision == BPrecision`; no mixed precision from the public API |
 | Low-level `__esimd_dpas2<u4, fp16, ...>` | No working smoke | oneAPI 2026.1 expected unexpected A/B vector lengths (N1/N2 mismatch); treat as unverified |
 | Repeated u8 ESIMD batch | Driver crash at `q.wait()` | One-shot u8 kernel was correct, but 100+ batched submissions crashed; use the stable joint_matrix u8 path for production |
@@ -78,6 +79,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 | Softmax tiled max pass staged through SLM | 1024x16384 0.6609 ms | 0.5923 to 0.5985 ms with max read directly from global | The max pass never re-reads the row, so SLM staging only adds loads and barriers |
 | Softmax fixed wg128 for short rows | 1024x256 0.0227 ms | 0.0112 to 0.0123 ms with dynamic 16/32/128 threads | Mostly-idle work-groups and group-reduce overhead dominate small shapes |
 | f16/u4/bf16 host-dequantized bf16 DPAS | 0.060 to 0.061 ms | oneDNN u4 `jit:gemm:any` 0.033 to 0.034 ms | Native u4/f16 DPAS is not exposed to SYCL; dequantizing to bf16 adds the same bf16 GEMM cost as the bf16 campaign |
+| u4->bf16 GEMV bf16 vector accumulator | 535/4096 rows wrong at 4096x4096 | 0/4096 with float accumulator | A bf16 `vec` accumulator passes 64x128 but loses too much precision at large K; keep the accumulator in float and round once |
+| u4->bf16 GEMV manual 2/4-way unroll | 0.124 ms both variants | 0.088 ms simple loop | Explicit multi-accumulator unrolling added register pressure and address math; the compiler already schedules the 8-iteration per-lane loop |
 
 ## Behavioral Traps
 
@@ -97,6 +100,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - `vec<float,16>` fast paths are alignment-sensitive. If the input comes from `std::vector` or a SYCL buffer over host memory, do not assume 64 B alignment; either copy into aligned USM or use the scalar SLM path.
 - oneDNN softmax baselines are shape-dependent: 1024x16384 measured 2.64 ms while 1024x4096 measured 0.217 ms on the same machine. Verify the library result against the CPU reference and re-measure per shape before drawing a conclusion.
 - f16 -> bf16 activation conversion changes the result. Verify the optimized kernel against a same-precision bf16 reference; against the original f16 float reference the `max_abs_err` was about 3.7 for 1024x1536x512 even though the bf16-path reference reported `errors: 0`.
+- For u4 -> bf16 GEMV, dequantize the u4 vector to bf16 on the host once before the timed loop. Re-unpacking u4 and scales inside the kernel keeps it instruction-bound (2.22 ms naive vs 0.0883 ms after host dequant).
+- oneDNN u4 `Kx1` with `fpmath_mode::any` can differ from the f32/bf16 reference at K=4096 (39/4096 rows at 5% relative tolerance). Use it for timing, not as the correctness oracle; verify the SYCL kernel against the bf16-dequantized reference.
 - bf16 host packing strides are element counts, not byte counts. A DPAS slice is 128 bf16 (256 B), so slice offsets are 0/128/256/384, and a K=32 block advances by 4096 A / 2048 B bf16 elements. Using byte-sized strides caused out-of-bounds writes and silent kernel crashes.
 
 ## Diagnostic Traps
