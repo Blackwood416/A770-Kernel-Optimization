@@ -30,6 +30,11 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](code
 | oneDNN matmul `1xK` as a GEMV baseline | Wrong operator | Computes `x*A` (`A^T*x`); max_err 326 vs the CPU reference, so the 0.182 ms number is not comparable |
 | `sycl::reduce_over_group(nd_item, ...)` | Compile error | oneAPI 2026.1 requires a group object; pass `it.get_group()` or a `sub_group`, not the `nd_item` |
 | `vec<float,16>` on `std::vector`/buffer host memory | Alignment risk | 64 B loads need aligned USM; use `sycl::aligned_alloc_shared/device<float>(64, ...)` on the fast path and a scalar generic path for odd columns |
+| oneDNN u4 matmul, `ab` weights, no scales | `ocl:ref:any` ~110 ms | Plain `ab` u4 did not select a GPU JIT path for f16/u4/bf16 on oneAPI 2026.1 |
+| oneDNN u4 matmul, `ba` weights + scales | `jit:gemm:any` 0.033 to 0.034 ms | `ba` (`[N, K/2]`) + per-group f16 scales + zero-point 8 + `fpmath_mode::any` selects the fast path |
+| SYCL `dpas` mixed f16/u4 | Compile-time rejected | The fp16/bf16 branch asserts `APrecision == BPrecision`; no mixed precision from the public API |
+| Low-level `__esimd_dpas2<u4, fp16, ...>` | No working smoke | oneAPI 2026.1 expected unexpected A/B vector lengths (N1/N2 mismatch); treat as unverified |
+| Repeated u8 ESIMD batch | Driver crash at `q.wait()` | One-shot u8 kernel was correct, but 100+ batched submissions crashed; use the stable joint_matrix u8 path for production |
 
 ## Structural Experiments That Failed
 
@@ -72,6 +77,7 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 | Softmax one-shot SLM limit 4096 cols | 16x4097 0.0372 ms | 0.0227 ms after raising the limit to 8192 | 32 KB one-shot tiles launch fine and beat the three-pass tiled path for 4097/8192 |
 | Softmax tiled max pass staged through SLM | 1024x16384 0.6609 ms | 0.5923 to 0.5985 ms with max read directly from global | The max pass never re-reads the row, so SLM staging only adds loads and barriers |
 | Softmax fixed wg128 for short rows | 1024x256 0.0227 ms | 0.0112 to 0.0123 ms with dynamic 16/32/128 threads | Mostly-idle work-groups and group-reduce overhead dominate small shapes |
+| f16/u4/bf16 host-dequantized bf16 DPAS | 0.060 to 0.061 ms | oneDNN u4 `jit:gemm:any` 0.033 to 0.034 ms | Native u4/f16 DPAS is not exposed to SYCL; dequantizing to bf16 adds the same bf16 GEMM cost as the bf16 campaign |
 
 ## Behavioral Traps
 
@@ -90,6 +96,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - For row-reduction kernels, treat `sycl::reduce_over_group` as a group API: pass `it.get_group()` for a whole work-group or a `sub_group`, never the `nd_item`. This is a compile-time gate, not a tuning choice.
 - `vec<float,16>` fast paths are alignment-sensitive. If the input comes from `std::vector` or a SYCL buffer over host memory, do not assume 64 B alignment; either copy into aligned USM or use the scalar SLM path.
 - oneDNN softmax baselines are shape-dependent: 1024x16384 measured 2.64 ms while 1024x4096 measured 0.217 ms on the same machine. Verify the library result against the CPU reference and re-measure per shape before drawing a conclusion.
+- f16 -> bf16 activation conversion changes the result. Verify the optimized kernel against a same-precision bf16 reference; against the original f16 float reference the `max_abs_err` was about 3.7 for 1024x1536x512 even though the bf16-path reference reported `errors: 0`.
+- bf16 host packing strides are element counts, not byte counts. A DPAS slice is 128 bf16 (256 B), so slice offsets are 0/128/256/384, and a K=32 block advances by 4096 A / 2048 B bf16 elements. Using byte-sized strides caused out-of-bounds writes and silent kernel crashes.
 
 ## Diagnostic Traps
 

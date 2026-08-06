@@ -165,6 +165,38 @@ icx-cl /fsycl /EHsc softmax_opt.cpp /I "C:\Program Files (x86)\Intel\oneAPI\dnnl
 
 Always verify the oneDNN output against the CPU softmax reference. The 1024x4096 baseline measured 0.217 ms while 1024x16384 measured 2.64 ms, so re-measure the baseline per shape instead of extrapolating.
 
+## oneDNN INT4 Matmul Baseline (f16 x u4 -> bf16)
+
+Use this configuration to avoid oneDNN's `ocl:ref` fallback. With `ab` u4 weights and no scales, oneAPI 2026.1 selected `ocl:ref:any` (~110 ms for 1024x1536x512); with `ba` + group scales + zero point it selected `jit:gemm:any` (0.033 to 0.034 ms).
+
+```cpp
+dnnl::memory::desc src_md(
+    {M, K}, dnnl::memory::data_type::f16, dnnl::memory::format_tag::ab);
+dnnl::memory::desc wei_md(
+    {K, N}, dnnl::memory::data_type::u4, dnnl::memory::format_tag::ba);
+dnnl::memory::desc dst_md(
+    {M, N}, dnnl::memory::data_type::bf16, dnnl::memory::format_tag::ab);
+dnnl::memory::desc scale_md(
+    {K / group_size, N}, dnnl::memory::data_type::f16,
+    dnnl::memory::format_tag::ab);
+dnnl::memory::desc zp_md(
+    {1}, dnnl::memory::data_type::u8, dnnl::memory::format_tag::a);
+
+dnnl::primitive_attr attr;
+attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1),
+                {group_size, 1}, dnnl::memory::data_type::f16);
+attr.set_zero_points(DNNL_ARG_WEIGHTS, 0, {},
+                     dnnl::memory::data_type::u8);
+attr.set_fpmath_mode(dnnl::fpmath_mode::any, true);
+
+dnnl::matmul::primitive_desc pd(eng, src_md, wei_md, dst_md, attr);
+dnnl::matmul prim(pd);
+```
+
+Pass the packed weights buffer as `[N, K/2]` bytes, low nibble first along K. Pass `DNNL_ARG_ATTR_SCALES | DNNL_ARG_WEIGHTS` for the f16 scale memory and `DNNL_ARG_ATTR_ZERO_POINTS | DNNL_ARG_WEIGHTS` for the u8 zero-point memory. Signed int4 data stored as `[-8,7]` maps to u4 by adding 8, so the zero-point tensor is `{8}`.
+
+SYCL `dpas` cannot run this mixed f16/u4 shape directly. The stable SYCL fallback is host-dequantized u4 -> bf16 followed by the bf16 ESIMD DPAS kernel; that lands at 0.060 to 0.061 ms versus oneDNN's 0.033 to 0.034 ms.
+
 ## Build and Run Commands
 
 Windows oneAPI (user-validated):

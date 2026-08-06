@@ -9,6 +9,7 @@
 - f32 GEMV ladder and baselines
 - f32 RMSNorm ladder (1024x4096)
 - f32 Softmax ladder
+- f16/u4/bf16 GEMM (1024x1536x512, group_size=128)
 - Interpreting VTune gpu-hotspots metrics
 
 ## Benchmark Context and Baselines
@@ -192,6 +193,40 @@ Generic column counts (257, 1025, 4097) use a scalar-load SLM path because `vec<
 - For rows that exceed one SLM tile, keep the max pass out of SLM entirely: threads read global chunks directly and reduce, then tiles are staged only for sum and normalize. That reduces global row reads from three to two and cut 1024x16384 from 0.66 ms to 0.59 ms.
 - Dynamic work-group sizing matters most below 1024 columns. 16 threads for cols <= 256, 32 for cols <= 1024, and 128 otherwise removed mostly-idle work-groups; do not ship a fixed 128-thread kernel for every shape without checking small-row shapes.
 - Alignment is a correctness gate for the vector fast path: allocate input/output with `sycl::aligned_alloc_shared<float>(64, ...)`. For arbitrary odd column counts, the generic scalar SLM path is still much faster than the naive row-per-item kernel.
+
+## f16/u4/bf16 GEMM (1024x1536x512, group_size=128)
+
+Measured on Intel Arc A770 with oneAPI 2026.1, USM harness (100 warmup + 1000 timed launches, three runs, `q.wait()`).
+
+| Variant | Per-run | Notes |
+|---|---:|---|
+| Naive f16 x u4 -> bf16 | 1.587 ms | One work-item per C element, nibble unpack in the kernel |
+| oneDNN `ab` u4, no scales | 110.62 ms | `ocl:ref:any`; measured with 5 warmup + 20 timed because the reference path is extremely slow |
+| oneDNN `ba` u4 + f16 scales + zp8 | 0.0333 to 0.0344 ms | `jit:gemm:any`; `errors: 0/1572864` |
+| SYCL bf16 DPAS after host dequant | 0.060 to 0.061 ms | u4 weights are dequantized to bf16 once on the host, then the standard bf16 ESIMD 16x16 kernel runs |
+
+Why the SYCL path plateaus:
+
+- The stable SYCL path is memory- and instruction-equivalent to the bf16 campaign, so it lands at ~0.060 ms, not at the u4 path's 0.033 ms.
+- SYCL `dpas` statically rejects mixed f16 + u4 operands. The low-level `__esimd_dpas2<u4, fp16, ...>` intrinsic did not compile to a working A/B operand shape on oneAPI 2026.1.
+- oneDNN reaches 0.033 ms because its ngen-generated u4 JIT path consumes the packed `ba` layout and fuses the group-scale dequantization natively.
+
+To reproduce the oneDNN fast baseline, build a standalone C++ primitive (no PyTorch) with:
+
+```cpp
+src_md = memory::desc({M, K}, data_type::f16, format_tag::ab);
+wei_md = memory::desc({K, N}, data_type::u4, format_tag::ba); // [N, K/2] bytes
+dst_md = memory::desc({M, N}, data_type::bf16, format_tag::ab);
+scale_md = memory::desc({G, N}, data_type::f16, format_tag::ab);
+zp_md = memory::desc({1}, data_type::u8, format_tag::a);
+
+attr.set_scales(DNNL_ARG_WEIGHTS, (1 << 0) | (1 << 1),
+                {group_size, 1}, data_type::f16);
+attr.set_zero_points(DNNL_ARG_WEIGHTS, 0, {}, data_type::u8);
+attr.set_fpmath_mode(fpmath_mode::any, true);
+```
+
+Weights are packed as `[N, K/2]` with the low nibble first along K. Scale `g` applies to `k / group_size`, and the signed value is `u4 - 8`. The full standalone harness is `bench_onednn_int4_gemm.cpp` from the QuantizedGEMM-Opti campaign.
 
 ## Interpreting VTune gpu-hotspots Metrics
 

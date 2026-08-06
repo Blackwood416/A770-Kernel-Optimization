@@ -7,6 +7,8 @@ description: "Optimize SYCL/ESIMD compute kernels for Intel Arc/Xe-HPG GPUs (A77
 
 Optimize SYCL/ESIMD kernels on Intel Arc A770 (Xe-HPG/DG2) with measured hardware facts, a proven technique ladder, known pitfalls, and API usage rules extracted from a complete bf16 GEMM campaign (naive 1.95 ms to 0.0614 ms, about 87% of oneMKL and 90% of oneDNN), a f32 GEMV campaign (naive 2.65 ms to 0.215 ms, faster than the same-operation oneMKL/oneDNN baselines), a f32 RMSNorm campaign (naive 5.382 ms to 0.098 ms, about 1.25x faster than the oneDNN RMSNorm baseline), and a f32 Softmax campaign (naive 5.55 ms to 0.107 ms for 1024x4096, about 2x faster than the oneDNN softmax baseline).
 
+The f16/u4/bf16 GEMM campaign (M=1024, N=1536, K=512, group_size=128) documents a case where oneDNN's native u4 JIT path beats the best stable SYCL path: oneDNN `jit:gemm:any` 0.033 to 0.034 ms vs host-dequantized bf16 DPAS 0.060 ms, because SYCL `dpas` rejects mixed f16/u4 precision.
+
 ## Workflow
 
 1. Build the correctness harness first: CPU reference, `errors: 0/...`, warmup + timed loop, then 3+ stable runs.
@@ -46,6 +48,8 @@ Apply in this order; each step was measured on the same bf16 GEMM (1024x1536x512
 
 Measured ladder: 1.95 ms naive -> 0.118 ms joint_matrix best -> 0.099 ms ESIMD -> 0.073 ms operand layout -> 0.0614 ms final (oneMKL 0.0529, oneDNN 0.0552). Every ladder step maps to an embedded code snippet in [Ladder to Snippet Map](references/code-snippets.md#ladder-to-snippet-map); details and reasons: [techniques.md](references/techniques.md).
 
+For f16 activation + u4 weights + bf16 dst (`1024x1536x512`, `group_size=128`): naive 1.587 ms, oneDNN u4 `ba` + per-group f16 scales + zero-point 8 + `fpmath_mode::any` is `jit:gemm:any` at 0.0333 to 0.0344 ms, and the best stable SYCL path is host dequant u4 -> bf16 followed by the bf16 ESIMD DPAS kernel at 0.060 to 0.061 ms. The remaining ~1.8x gap is the native u4/f16 path that oneDNN's ngen codegen uses; SYCL `dpas` statically rejects the mixed precision and the low-level `__esimd_dpas2<u4, fp16, ...>` smoke did not produce a working A/B operand shape on oneAPI 2026.1.
+
 For f32 GEMV (`y = A*x`, `4096x4096`, row-major A), the measured standard-SYCL ladder is: naive row-per-item 2.65 ms -> vec16 row + SLM x 0.50 ms -> one row per sub-group + SLM x 0.24 ms -> one row per sub-group + x direct from L2 + dynamic per-lane trip count 0.215 ms. Same-operation library baselines: oneMKL GPU gemv 0.329 ms, oneDNN GPU matmul `Kx1` 0.380 ms. Details and VTune instruction mix: [techniques.md](references/techniques.md#f32-gemv-ladder-4096x4096-row-major-a); copy-ready kernel: [code-snippets.md](references/code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
 
 For f32 RMSNorm (`1024x4096`, x/gamma/y f32), the measured standard-SYCL ladder is: naive row-per-item 5.382 ms -> sub-group-per-row direct L2 0.153 to 0.157 ms -> SLM row tile with one row per 128-thread work-group and two barriers 0.098 to 0.100 ms. Same-operation baseline: oneDNN `layer_normalization_forward` with `rms_norm` flag, 0.1235 to 0.1242 ms. SLM staging wins here even though it lost for GEMV's x, because RMSNorm re-reads each row after the reduction. Details: [techniques.md](references/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); copy-ready kernel: [code-snippets.md](references/code-snippets.md#f32-rmsnorm-core-slm-row-tile).
@@ -75,6 +79,10 @@ For f32 Softmax (`1024x4096`, row-major x/y f32), the measured standard-SYCL lad
 - Shrink the work-group size for small rows/columns. For softmax, 16 threads for cols <= 256, 32 for cols <= 1024, and 128 otherwise removed idle-thread waste; 1024x256 went from 1.34x the oneDNN time to faster than it.
 - For rows larger than one SLM tile, compute the max pass directly from global and stage SLM tiles only for the sum and normalize passes. That cut 1024x16384 softmax from 0.66 ms to 0.59 ms by reducing global reads from three to two.
 - oneDNN softmax baseline: use `softmax_forward` + `algorithm::softmax_accurate` with `axis=1` and verify against the CPU reference. Its 1024x16384 f32 path measured 2.64 ms, much slower than smaller shapes, so re-measure the baseline per shape before trusting it.
+- oneDNN u4 matmul with a plain `ab` weights descriptor and no scales falls back to `ocl:ref:any` (~110 ms for 1024x1536x512). Use `ba` weights (`[N, K/2]` packed u4), per-group f16 scales, zero-point 8, and `fpmath_mode::any` to get the `jit:gemm:any` path at 0.033 to 0.034 ms.
+- SYCL `dpas` does not accept mixed f16/bf16 + u4 operands: the fp16/bf16 branch asserts `APrecision == BPrecision`. Host-dequantize u4 to bf16 outside the timed loop and use the known-good bf16 DPAS path; that is stable but ~1.8x slower than oneDNN's native u4 JIT.
+- Low-level `__esimd_dpas2<dpas_argument_type::u4, dpas_argument_type::fp16, ...>` compiles the intrinsic call only with unexpected A/B vector lengths on oneAPI 2026.1; the smoke did not run correctly. Treat mixed-precision u4 DPAS as not accessible from SYCL/ESIMD until a working layout is proven.
+- When host-packing bf16 DPAS slices, all pointer strides are element counts: one slice is 128 bf16 (256 B), so the next slice is `+128`, not `+256`, and a 32-deep K block advances by 4096 A / 2048 B bf16 elements. Byte-sized strides caused out-of-bounds writes and silent kernel crashes.
 
 Complete evidence table: [pitfalls.md](references/pitfalls.md)
 
