@@ -26,6 +26,8 @@
 - Precision tolerance helper
 - Reduction tree/atomic cores
 - Scan Hillis-Steele/Blelloch cores
+- Attention online core
+- Conv cache-block core
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -1523,3 +1525,146 @@ void scan_blelloch(sycl::queue& q, const float* in, float* out,
 
 WG64 was the measured best size for one-element-per-lane scans; WG512 pays
 the largest per-work-group barrier cost.
+
+## Attention Online Core
+
+Extracted from `E:\RiderProjects\AttentionConv-Opti\attention\src\attention_ladder.cpp`.
+This is the `run_online` core with Q/K/V staged in SLM and online max/sum
+merged across KV blocks. Constants for the measured shape: `BM=32`, `BN=32`,
+`VLEN=8`, `WG = BM * D/VLEN`.
+
+```cpp
+constexpr int BM = 32;
+constexpr int BN = 32;
+constexpr int VLEN = 8;
+
+void run_online(sycl::queue& q, const Config& c, const float* qq,
+                const float* kk, const float* vv, float* out) {
+    const int qblocks = c.Q / BM;
+    const int wgs = c.B * c.H * qblocks;
+    const int wg_size = BM * (c.D / VLEN);
+    const int dgroups = c.D / VLEN;
+    const float scale = 1.0f / std::sqrt((float)c.D);
+    q.submit([&](sycl::handler& h) {
+        sycl::local_accessor<float, 2> qt(sycl::range<2>(BM, c.D), h);
+        sycl::local_accessor<float, 2> kt(sycl::range<2>(BN, c.D), h);
+        sycl::local_accessor<float, 2> vt(sycl::range<2>(BN, c.D), h);
+        h.parallel_for(sycl::nd_range<1>(sycl::range<1>(wgs * wg_size),
+                                         sycl::range<1>(wg_size)),
+                       [=](sycl::nd_item<1> it) {
+            const int lid = (int)it.get_local_linear_id();
+            const int wg = (int)it.get_group_linear_id();
+            const int b = wg / (c.H * qblocks);
+            const int hh = (wg / qblocks) % c.H;
+            const int qb = wg % qblocks;
+            const int row = lid / dgroups;
+            const int dvec = lid % dgroups;
+            const int dbase = dvec * VLEN;
+            const int qrow = qb * BM + row;
+
+            for (int t = 0; t < VLEN; ++t)
+                qt[row][dbase + t] = qq[bhq(c, b, hh, qrow) + dbase + t];
+            it.barrier(sycl::access::fence_space::local_space);
+
+            float m = -sycl::infinity_v<float>;
+            float l = 0.0f;
+            float acc[VLEN];
+            float block_acc[VLEN];
+            float scores[BN];
+            for (int d = 0; d < VLEN; ++d) acc[d] = 0.0f;
+
+            const int max_key = c.causal ? c.kv_start + qrow : c.KV - 1;
+            for (int kb = 0; kb < c.KV / BN; ++kb) {
+                if (c.causal && kb * BN > max_key) break;
+                for (int idx = lid; idx < BN * c.D; idx += wg_size) {
+                    const int j = idx / c.D;
+                    const int d = idx % c.D;
+                    const int gj = kb * BN + j;
+                    kt[j][d] = kk[bhkv(c, b, hh, gj) + d];
+                    vt[j][d] = vv[bhkv(c, b, hh, gj) + d];
+                }
+                it.barrier(sycl::access::fence_space::local_space);
+
+                const int jend = std::min(BN, max_key - kb * BN + 1);
+                const float m_old = m;
+                float sum = 0.0f;
+                for (int j = 0; j < jend; ++j) {
+                    float s = 0.0f;
+                    for (int d = 0; d < c.D; ++d)
+                        s += qt[row][d] * kt[j][d];
+                    s *= scale;
+                    scores[j] = s;
+                    if (s > m) {
+                        sum = sum * std::exp(m - s) + 1.0f;
+                        m = s;
+                    } else {
+                        sum += std::exp(s - m);
+                    }
+                }
+                const float rescale =
+                    m_old == -sycl::infinity_v<float> ? 0.0f
+                                                      : std::exp(m_old - m);
+                l = l * rescale + sum;
+                for (int d = 0; d < VLEN; ++d) block_acc[d] = 0.0f;
+                for (int j = 0; j < jend; ++j) {
+                    const float p = std::exp(scores[j] - m);
+                    for (int d = 0; d < VLEN; ++d)
+                        block_acc[d] += p * vt[j][dbase + d];
+                }
+                for (int d = 0; d < VLEN; ++d)
+                    acc[d] = acc[d] * rescale + block_acc[d];
+                it.barrier(sycl::access::fence_space::local_space);
+            }
+            for (int d = 0; d < VLEN; ++d)
+                out[bhq(c, b, hh, qrow) + dbase + d] = acc[d] / l;
+        });
+    });
+}
+```
+
+Do not raise `BM` to 64 on this shape: `BM=64, BN=32, VLEN=8, WG=512` with
+about 40 KB SLM triggered `UR_RESULT_ERROR_DEVICE_LOST`.
+
+## Conv Cache-Block Core
+
+Extracted from `E:\RiderProjects\AttentionConv-Opti\conv\src\conv_ladder.cpp`.
+NHWC direct convolution with pre-packed `[KH][KW][IC][OC]` weights and a full
+OC cache block.
+
+```cpp
+template <int OCB>
+void run_direct_nhwc_cacheblock(sycl::queue& q, const float* x,
+                                const float* w_hwio, float* out) {
+    constexpr int groups = OC / OCB;
+    q.submit([&](sycl::handler& h) {
+        h.parallel_for(sycl::range<1>(N * OH * OW * groups),
+                       [=](sycl::id<1> idx) {
+            const int sp = (int)idx[0] / groups;
+            const int og = (int)idx[0] % groups;
+            const int oc0 = og * OCB;
+            const int n = sp / (OH * OW);
+            const int rem = sp % (OH * OW);
+            const int oh = rem / OW;
+            const int ow = rem % OW;
+            float acc[OCB];
+            for (int t = 0; t < OCB; ++t) acc[t] = 0.0f;
+            for (int kh = 0; kh < KH; ++kh) {
+                for (int kw = 0; kw < KW; ++kw) {
+                    for (int ic = 0; ic < IC; ++ic) {
+                        const float xv = x[nhwc_idx(n, oh + kh, ow + kw, ic)];
+                        const size_t wbase =
+                            ((size_t)(kh * KW + kw) * IC + ic) * OC + oc0;
+                        for (int t = 0; t < OCB; ++t)
+                            acc[t] += xv * w_hwio[wbase + t];
+                    }
+                }
+            }
+            for (int t = 0; t < OCB; ++t)
+                out[nhwc_out_idx(n, oh, ow, oc0 + t)] = acc[t];
+        });
+    });
+}
+```
+
+`OCB=64` was the measured winner (`0.1605 ms`); bare NHWC direct without the
+cache block and weight prepack was about 6x slower.

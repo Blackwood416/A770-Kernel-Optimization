@@ -165,6 +165,27 @@ icx-cl /fsycl /EHsc softmax_opt.cpp /I "C:\Program Files (x86)\Intel\oneAPI\dnnl
 
 Always verify the oneDNN output against the CPU softmax reference. The 1024x4096 baseline measured 0.217 ms while 1024x16384 measured 2.64 ms, so re-measure the baseline per shape instead of extrapolating.
 
+## oneDNN Conv Baseline
+
+For an f32 convolution baseline on A770, use `dnnl::convolution_forward` with
+`prop_kind::forward_inference` and the same SYCL USM interop as the softmax
+baseline:
+
+```cpp
+dnnl::memory::desc src_md({N, IC, IH, IW}, dnnl::memory::data_type::f32,
+                          dnnl::memory::format_tag::nchw);
+dnnl::memory::desc wei_md({OC, IC, KH, KW}, dnnl::memory::data_type::f32,
+                          dnnl::memory::format_tag::oihw);
+dnnl::memory::desc dst_md({N, OC, OH, OW}, dnnl::memory::data_type::f32,
+                          dnnl::memory::format_tag::nchw);
+auto pd = dnnl::convolution_forward::primitive_desc(
+    eng, dnnl::prop_kind::forward_inference, dnnl::algorithm::convolution_direct,
+    src_md, wei_md, dst_md, {1, 1}, {0, 0}, {0, 0});
+```
+
+On the measured `4x32x64x64 -> 4x64x62x62` f32 shape, oneDNN was
+`0.0935 ms` while the best SYCL cache-blocked NHWC kernel was `0.1605 ms`.
+
 ## oneDNN INT4 Matmul Baseline (f16 x u4 -> bf16)
 
 Use this configuration to avoid oneDNN's `ocl:ref` fallback. With `ab` u4 weights and no scales, oneAPI 2026.1 selected `ocl:ref:any` (~110 ms for 1024x1536x512); with `ba` + group scales + zero point it selected `jit:gemm:any` (0.033 to 0.034 ms).

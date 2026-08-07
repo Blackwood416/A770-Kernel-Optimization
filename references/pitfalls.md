@@ -116,6 +116,10 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - Larger scan work-groups do not automatically win: A770 barriers expand into many synchronization instructions, and WG512 paid the largest per-group cost. WG64 was the measured sweet spot.
 - `named_barrier` on A770 is a runtime device-JIT gate, not a host compile gate: oneAPI 2026.1 compiles the kernel and then rejects it with "Named barriers are not supported by XeHPG".
 - The historical 100+ batch ESIMD driver crash was not reproduced in a controlled 600-submission stress run on driver 32.0.101.8724. Treat it as a non-deterministic risk and keep running one target per process.
+- Flash-attention `BM=64, BN=32, VLEN=8, WG=512` with about 40 KB SLM triggered Level Zero `UR_RESULT_ERROR_DEVICE_LOST` on A770 and required a manual GPU reset; keep BM=32 on the measured shape.
+- Direct-L2 flash attention loses to SLM staging: `online_direct_l2` measured 3.21 ms vs 2.06 ms for the SLM online path because each d-slice redundantly re-reads K/V.
+- Bare NHWC direct conv is about 6x slower than NCHW direct on the measured shape; NHWC only wins with OC cache blocking plus `[KH][KW][IC][OC]` weight prepack.
+- im2col+GEMM conv layout traps: the GEMM matrix width is OC, not batch N, and im2col K is `[KH][KW][IC]` matching `w_hwio`. The output channel stride must be OC for both NCHW and NHWC outputs.
 
 ## Diagnostic Traps
 
