@@ -212,6 +212,20 @@ Large GRF option (measured negative on A770 for joint_matrix and ESIMD; keep onl
 icx-cl /fsycl -Xsycl-target-backend "-options -ze-opt-large-register-file" gemm.cpp /Fe:gemm.exe
 ```
 
+## IR, SPIR-V, and GEN Assembly Dump
+
+Text device LLVM IR is not supported (`-S -emit-llvm` reports
+`IR output is not supported`). Preserve these artifacts instead:
+
+```powershell
+icpx -fsycl -fsycl-device-obj=spirv -O2 -DUNROLL=1 bench.cpp
+llvm-spirv -r -o module.spv bench-sycl-spir64-unknown-unknown.bc
+llvm-spirv --to-text module.spv -o module.spv.txt
+ocloc compile -device dg2-g10-a0 -spirv-input module.spv -output gen
+```
+
+The `ocloc` device name for A770 is `dg2-g10-a0` (PCI ID `0x56a0`).
+
 ## VTune Commands
 
 Instruction-count profile (no admin needed):

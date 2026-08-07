@@ -113,3 +113,6 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - Without admin rights, VTune lacks EU-level detail (occupancy, barrier stalls); still useful for instruction-count and launch overhead.
 - Wall clock and kernel time differ: our best kernel had about 1.7 us launch gap, already better than oneDNN's 4.3 us. Optimize launch only after measuring it.
 - VTune `instruction-count` sampling inflated RMSNorm wall time by ~50-60x (0.154 ms to ~10 ms). Compare instruction mixes between variants, not profiled milliseconds.
+- Device-side text LLVM IR is not supported on oneAPI 2026.1; keep LLVM bitcode, SPIR-V text via `llvm-spirv --to-text`, and GEN assembly via `ocloc compile`.
+- On simple non-XMX bf16 loops, O3, fp-contract, fast-math, and large GRF do not change JIT instruction counts and are neutral or slightly negative; explicit 2-way unroll is the stable win.
+- Large GRF has no universal verdict: it is negative for joint_matrix/XMX kernels but positive for AOT + unroll4 simple GEMM on the measured A770. Qualify every large-GRF claim with the kernel shape.
