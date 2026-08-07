@@ -240,6 +240,22 @@ vtune -report hotspots -r <dir> -group-by computing-task ...
 
 Read these metrics: GPU time per kernel, ALU0/ALU1 instructions, Send instructions, XMX instructions, GPU Barriers, Occupancy, XMX pipeline active, XVE Active/Stalled/Idle, L3 Bandwidth Bound.
 
+## Execution Model Submission Forms
+
+- Same-queue two-kernel submission is the baseline; dual-queue + event saved
+  about 17 us per invocation on the measured pack+GEMM shape.
+- SYCL graph: build and `finalize()` once, then call `execute_graph` in the
+  timed loop. Graph does not expose per-node SYCL profiling events on oneAPI
+  2026.1; use VTune `xpu-offload` for node times.
+- Fuse only when the extra device time is smaller than the launch gap plus
+  host overhead it removes. On the measured shape, fusing pack into GEMM lost
+  about 47 us per iteration.
+- Host preprocessing is only profitable when it can run once outside the
+  timed loop. Repeating host VNNI pack inside the loop cost 775 us of CPU work
+  plus about 301 us of USM visibility overhead.
+
+Copy-ready forms: [execution graph/dual-queue cores](code-snippets.md#execution-graph-dual-queue-cores).
+
 ## Verification Methodology
 
 1. Run 100 warmup iterations, then 1000 timed iterations with `q.wait()`, and report the average.

@@ -103,6 +103,9 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - For u4 -> bf16 GEMV, dequantize the u4 vector to bf16 on the host once before the timed loop. Re-unpacking u4 and scales inside the kernel keeps it instruction-bound (2.22 ms naive vs 0.0883 ms after host dequant).
 - oneDNN u4 `Kx1` with `fpmath_mode::any` can differ from the f32/bf16 reference at K=4096 (39/4096 rows at 5% relative tolerance). Use it for timing, not as the correctness oracle; verify the SYCL kernel against the bf16-dequantized reference.
 - bf16 host packing strides are element counts, not byte counts. A DPAS slice is 128 bf16 (256 B), so slice offsets are 0/128/256/384, and a K=32 block advances by 4096 A / 2048 B bf16 elements. Using byte-sized strides caused out-of-bounds writes and silent kernel crashes.
+- On the joint-matrix pack+GEMM kernel, `sub_group_size<16>` and `reqd_sub_group_size(16)` trigger an IGC internal divide-by-zero on oneAPI 2026.1; use the measured 2D `(8, 64)` local mapping instead.
+- The second 8-column B slice of a joint-matrix GEMM is 8 `uint32` words past the first slice, i.e. `+16 bf16` after casting to `bf16*`; `+8 bf16` silently produces half-wrong output columns.
+- Fusing a pack kernel into GEMM is not always a win. Measured fused added 93 us of device time and removed only 46 us of launch gap plus host overhead, so it lost 47 us per iteration. Fuse only when `fused device delta < launch gap + host overhead saved`.
 
 ## Diagnostic Traps
 

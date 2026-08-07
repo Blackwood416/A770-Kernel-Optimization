@@ -19,6 +19,7 @@
 - f32 RMSNorm core (SLM row tile)
 - f32 Softmax core (SLM row tile)
 - Bandwidth read/copy/reduce cores
+- Execution graph/dual-queue cores
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -1094,3 +1095,40 @@ void run_reduce(sycl::queue &q, const float *src, float *out, size_t msgs,
 Use `(V, Repeats) = (8,1)`, `(16,1)`, `(16,2)`, `(16,4)` for 32/64/128/256 B
 messages, and allocate source/destination/out with
 `sycl::aligned_alloc_device<float>(64, n, q)`.
+
+## Execution Graph/Dual-Queue Cores
+
+Extracted from `E:\RiderProjects\KernelExec-Opti\src\execution_model.cpp`.
+`submit_pack`/`submit_gemm` return SYCL profiling events; `event_us` reads
+`command_start`/`command_end`.
+
+```cpp
+namespace ex = sycl::ext::oneapi::experimental;
+
+// Reusable graph: pack -> GEMM, submitted once.
+ex::command_graph<> graph(graph_q);
+auto pack_node = graph.add([&](sycl::handler& h) {
+  pack_cgf(h, Braw, Bp, K, N);
+});
+auto gemm_node = graph.add([&](sycl::handler& h) {
+  gemm_cgf(h, A, Bp, C, M, N, K);
+});
+graph.make_edge(pack_node, gemm_node);
+auto exec = graph.finalize();
+
+graph_q.submit([&](sycl::handler& h) {
+  ex::execute_graph(h, exec);
+});
+graph_q.wait();
+
+// Dual queue with event dependency.
+auto ep = submit_pack(pack_q, Braw, Bp, K, N);
+auto eg = submit_gemm(gemm_q, A, Bp, C, M, N, K, {ep});
+pack_q.wait();
+gemm_q.wait();
+double gap_us = event_gap_us(ep, eg);
+```
+
+Graph node times are not exposed through SYCL profiling events on oneAPI
+2026.1; cross-check with VTune `xpu-offload`. Rebuild/finalize the graph once
+outside the timed loop; only `execute_graph` belongs inside it.
