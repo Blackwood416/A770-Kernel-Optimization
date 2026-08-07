@@ -24,6 +24,8 @@
 - GEMV fast core
 - Sparse CSR/BSR cores
 - Precision tolerance helper
+- Reduction tree/atomic cores
+- Scan Hillis-Steele/Blelloch cores
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -1363,3 +1365,161 @@ void record_error(double got, double want,
 
 Use `rel=0, abs=0` for int8 exact paths, and the tolerance table in
 [numerics.md](techniques/numerics.md) after restructure for f32/bf16/f16.
+
+## Reduction Tree/Atomic Cores
+
+Extracted from `E:\RiderProjects\Reduction-Opti\src\bench.cpp`. The fast
+patterns are a tree with SG reduce plus partials, and a global atomic with one
+atomic per sub-group.
+
+```cpp
+void launch_tree(sycl::queue& q, const float* x, float* partials, float* out) {
+    q.submit([&](sycl::handler& h) {
+        sycl::local_accessor<float, 1> sums(sycl::range<1>(8), h);
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(1024 * 512),
+                              sycl::range<1>(512)),
+            [=](sycl::nd_item<1> it) {
+                const size_t gid = it.get_group(0);
+                const size_t tid = it.get_local_linear_id();
+                auto sg = it.get_sub_group();
+                const size_t lane = sg.get_local_linear_id();
+                const size_t sg_id = sg.get_group_linear_id();
+                if (tid < 8) sums[tid] = 0.0f;
+                it.barrier(sycl::access::fence_space::local_space);
+
+                sycl::vec<float, 16> acc(0.0f);
+                for (size_t k = 0; k < 2; ++k) {
+                    acc += *reinterpret_cast<const sycl::vec<float, 16>*>(
+                        x + gid * 4096 + (tid * 2 + k) * 16);
+                }
+                float partial = 0.0f;
+                for (size_t e = 0; e < 16; ++e) partial += acc[e];
+                partial = sycl::reduce_over_group(sg, partial,
+                                                  sycl::plus<float>());
+                if (lane == 0) sums[sg_id] = partial;
+                it.barrier(sycl::access::fence_space::local_space);
+                if (tid == 0) {
+                    float total = 0.0f;
+                    for (size_t i = 0; i < 8; ++i) total += sums[i];
+                    partials[gid] = total;
+                }
+            });
+    });
+    final_reduce_tree(q, partials, 1024, out);
+}
+
+void launch_global_atomic(sycl::queue& q, const float* x, float* out) {
+    q.submit([&](sycl::handler& h) {
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(1024 * 512),
+                              sycl::range<1>(512)),
+            [=](sycl::nd_item<1> it) {
+                const size_t gid = it.get_group(0);
+                const size_t tid = it.get_local_linear_id();
+                auto sg = it.get_sub_group();
+                const size_t lane = sg.get_local_linear_id();
+
+                sycl::vec<float, 16> acc(0.0f);
+                for (size_t k = 0; k < 2; ++k) {
+                    acc += *reinterpret_cast<const sycl::vec<float, 16>*>(
+                        x + gid * 4096 + (tid * 2 + k) * 16);
+                }
+                float partial = 0.0f;
+                for (size_t e = 0; e < 16; ++e) partial += acc[e];
+                partial = sycl::reduce_over_group(sg, partial,
+                                                  sycl::plus<float>());
+                if (lane == 0) {
+                    sycl::atomic_ref<float, sycl::memory_order::relaxed,
+                                     sycl::memory_scope::device,
+                                     sycl::access::address_space::global_space>
+                        ref(out[0]);
+                    ref.fetch_add(partial);
+                }
+            });
+    });
+}
+```
+
+Never reduce every thread directly to one global address on 4096x4096 f32:
+the measured per-thread atomic variant was 3.8x slower despite fewer
+instructions.
+
+## Scan Hillis-Steele/Blelloch Cores
+
+Extracted from `E:\RiderProjects\Reduction-Opti\src\bench.cpp`. Both are
+two-pass WG scans plus an `add_base` kernel; `partials[gid]` receives the WG
+total.
+
+```cpp
+template <int WG>
+void scan_hillis_steele(sycl::queue& q, const float* in, float* out,
+                        float* partials, size_t n) {
+    const size_t groups = (n + WG - 1) / WG;
+    q.submit([&](sycl::handler& h) {
+        sycl::local_accessor<float, 1> tile(sycl::range<1>(WG), h);
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(groups * WG),
+                              sycl::range<1>(WG)),
+            [=](sycl::nd_item<1> it) {
+                const size_t gid = it.get_group(0);
+                const size_t lane = it.get_local_linear_id();
+                const size_t gi = it.get_global_linear_id();
+                tile[lane] = (gi < n) ? in[gi] : 0.0f;
+                it.barrier(sycl::access::fence_space::local_space);
+                for (size_t d = 1; d < WG; d <<= 1) {
+                    const float add = (lane >= d) ? tile[lane - d] : 0.0f;
+                    it.barrier(sycl::access::fence_space::local_space);
+                    if (lane >= d) tile[lane] += add;
+                    it.barrier(sycl::access::fence_space::local_space);
+                }
+                if (gi < n) out[gi] = tile[lane];
+                if (lane == WG - 1) partials[gid] = tile[WG - 1];
+            });
+    });
+}
+
+template <int WG>
+void scan_blelloch(sycl::queue& q, const float* in, float* out,
+                   float* partials, size_t n) {
+    const size_t groups = (n + WG - 1) / WG;
+    q.submit([&](sycl::handler& h) {
+        sycl::local_accessor<float, 1> tile(sycl::range<1>(WG), h);
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(groups * WG),
+                              sycl::range<1>(WG)),
+            [=](sycl::nd_item<1> it) {
+                const size_t gid = it.get_group(0);
+                const size_t lane = it.get_local_linear_id();
+                const size_t gi = it.get_global_linear_id();
+                const float input = (gi < n) ? in[gi] : 0.0f;
+                tile[lane] = input;
+                it.barrier(sycl::access::fence_space::local_space);
+                for (size_t d = 1; d < WG; d <<= 1) {
+                    const size_t offset = (lane + 1) * d * 2 - 1;
+                    if (offset < WG) tile[offset] += tile[offset - d];
+                    it.barrier(sycl::access::fence_space::local_space);
+                }
+                if (lane == 0) {
+                    partials[gid] = tile[WG - 1];
+                    tile[WG - 1] = 0.0f;
+                }
+                it.barrier(sycl::access::fence_space::local_space);
+                for (size_t d = WG >> 1; d >= 1; d >>= 1) {
+                    const size_t offset = (lane + 1) * d * 2 - 1;
+                    if (offset < WG) {
+                        const float t = tile[offset];
+                        tile[offset] += tile[offset - d];
+                        tile[offset - d] = t;
+                    }
+                    it.barrier(sycl::access::fence_space::local_space);
+                }
+                it.barrier(sycl::access::fence_space::local_space);
+                if (gi < n) out[gi] = tile[lane] + input;
+            });
+    });
+}
+```
+
+WG64 was the measured best size for one-element-per-lane scans; WG512 pays
+the largest per-work-group barrier cost.

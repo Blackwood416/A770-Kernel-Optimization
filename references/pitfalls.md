@@ -112,6 +112,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - bf16/f16 accumulation in a low-precision accumulator is not just slower precision, it changes error class: measured bf16/bf16 reduction error reached 8.74 and f16/bf16 reached 2.29 on 256x4096. Keep accumulators in f32 unless the application explicitly accepts O(1) relative error.
 - On tiny inputs, flush-to-zero clears f32/bf16 products that underflow to f32 subnormals. Use absolute tolerance or pre-scale data when such underflow is allowed.
 - fp8 is not usable on this stack: oneAPI 2026.1 has no SYCL fp8 type and Xe-HPG has no fp8 DPAS path.
+- One global atomic per thread is the wrong reduction shape at 4096x4096 f32: `global_atomic_thread` had the lowest instruction count but was 3.8x slower than tree because all atomics serialize on one address.
+- Larger scan work-groups do not automatically win: A770 barriers expand into many synchronization instructions, and WG512 paid the largest per-group cost. WG64 was the measured sweet spot.
 
 ## Diagnostic Traps
 
