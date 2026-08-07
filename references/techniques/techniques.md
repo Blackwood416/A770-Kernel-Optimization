@@ -263,7 +263,7 @@ attr.set_zero_points(DNNL_ARG_WEIGHTS, 0, {}, data_type::u8);
 attr.set_fpmath_mode(fpmath_mode::any, true);
 ```
 
-Weights are packed as `[N, K/2]` with the low nibble first along K. Scale `g` applies to `k / group_size`, and the signed value is `u4 - 8`. The full standalone harness is `bench_onednn_int4_gemm.cpp` from the QuantizedGEMM-Opti campaign.
+Weights are packed as `[N, K/2]` with the low nibble first along K. Scale `g` applies to `k / group_size`, and the signed value is `u4 - 8`. Build the oneDNN baseline as a standalone primitive so its timing is not mixed with a framework path.
 
 ## Interpreting VTune gpu-hotspots Metrics
 

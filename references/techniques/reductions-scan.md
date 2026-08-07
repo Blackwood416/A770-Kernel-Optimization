@@ -3,8 +3,7 @@
 Measured on Intel Arc A770, oneAPI 2026.1, driver `32.0.101.8724`. Wall
 times are 3-run averages with 20 warmup + 200 timed launches; all outputs
 pass the CPU reference. VTune uses `instruction-count`; its sampled wall
-times are inflated and only instruction mixes are compared. Source project:
-`E:\RiderProjects\Reduction-Opti` (`references\reductions-scan.md`).
+times are inflated and only instruction mixes are compared.
 
 ## Full-Tensor Reduction on 4096x4096 f32
 
@@ -88,11 +87,9 @@ expands into many SLM/synchronization instructions.
 
 ## Reproduction
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-bench.exe --mode reduce --reduce tree
-bench.exe --mode scan --scan hillis --wg 64
-```
+Build and run the reduction/scan benchmark with the standard oneAPI Windows
+commands in [api-usage.md](../api/api-usage.md); select variants with
+`--mode reduce` / `--mode scan`.
 
 Copy-ready cores: [reduction tree/atomic](../api/code-snippets.md#reduction-tree-atomic-cores),
 [scan Hillis-Steele/Blelloch](../api/code-snippets.md#scan-hillis-blelloch-cores).

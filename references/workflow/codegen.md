@@ -1,8 +1,7 @@
 # A770 Compiler Behavior Reference
 
-Measured on Intel Arc A770, oneAPI 2026.1 (`icpx`, build 20260617),
-driver `32.0.101.8724`, VTune 2026.2. Source project:
-`E:\RiderProjects\Codegen-Opti` (`references\codegen.md`).
+Measured on Intel Arc A770, oneAPI 2026.1 (`icpx`), driver `32.0.101.8724`,
+VTune 2026.2.
 
 ## Fixed Kernels
 
@@ -94,11 +93,6 @@ Wall time is 100 warmup + 300 timed iterations, 3 repeats, min taken.
 
 ## Reproduction
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-powershell -ExecutionPolicy Bypass -File scripts\run_sweep.ps1 -Kernel gemm
-powershell -ExecutionPolicy Bypass -File scripts\vtune_sweep.ps1 -Kernel gemm -Mode instruction-count
-powershell -ExecutionPolicy Bypass -File scripts\dump_ir.ps1
-```
-
-Environment details: `E:\RiderProjects\Codegen-Opti\references\environment.md`.
+Build each config with `icpx`/`icx-cl` as shown in
+[api-usage.md](../api/api-usage.md), profile with the VTune commands there,
+and preserve the IR artifacts listed above.

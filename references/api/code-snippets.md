@@ -30,11 +30,15 @@
 - Conv cacheblock core
 - Correctness and timing harness
 
-These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
+These snippets are taken from kernels that compiled and ran on Arc A770. Each
+section documents the kernel shape and constants it was measured with. They
+are building blocks, not a drop-in operator: adapt the tile constants, address
+math, and host packing to your shape, and keep the tile-divisibility
+constraints from the linked variants.
 
 ## Ladder to Snippet Map
 
-Every step of the measured ladder in [techniques.md](../techniques/techniques.md) maps to embedded code in this file, so the skill stays self-contained without the campaign workspace.
+Every step of the measured ladder in [techniques.md](../techniques/techniques.md) maps to embedded code in this file, so the skill stays self-contained.
 
 | Ladder step | Technique | Embedded snippet |
 |---|---|---|
@@ -58,7 +62,7 @@ The f32 Softmax ladder lives in [techniques.md](../techniques/techniques.md#f32-
 
 ## Naive Baseline
 
-Source pattern: `gemm.cpp` from the campaign workspace.
+Source pattern: `gemm.cpp`.
 
 Per-element global reads. Measured 1.95174 ms; use it only as a correctness baseline, never as a performance target.
 
@@ -612,7 +616,7 @@ if constexpr (Plain) {
 
 ## f32 GEMV Core (Sub-Group Per Row, Direct L2)
 
-Source pattern: `gemv.cpp` from the GEMV-Opti campaign.
+Source pattern: `gemv.cpp`.
 
 Measured 0.215 ms for `y = A*x`, `4096x4096`, row-major f32 A on A770; the same-operation baselines were oneMKL GPU gemv 0.329 ms and oneDNN GPU matmul `Kx1` 0.380 ms. Keep the per-lane trip count dynamic because the compiler may select 32-lane sub-groups.
 
@@ -656,7 +660,7 @@ This kernel requires `M % SG_PER_WG == 0` and `N % (VEC * SG_PER_WG) == 0`; keep
 
 ## u4->bf16 GEMV Core (Sub-Group Per Row, bf16 Vector + Float Accumulator)
 
-Source pattern: `gemv_u4_bf16.cpp` from the QuantizedGEMV-Opti campaign.
+Source pattern: `gemv_u4_bf16.cpp`.
 
 Measured 0.0883 ms for `y = A*x`, `4096x4096`, bf16 A, u4-packed x,
 group_size=128, f16 scales, zero-point 8, bf16 y; oneDNN `Kx1` measured
@@ -751,7 +755,7 @@ campaign: byte `k/2`, low nibble first along K. Both f16 and bf16 src select
 
 ## f32 RMSNorm Core (SLM Row Tile)
 
-Source pattern: `rmsnorm.cpp` from the RMSNorm-Opti campaign.
+Source pattern: `rmsnorm.cpp`.
 
 Measured 0.09797 to 0.1000 ms for 1024x4096 f32 on A770; the oneDNN RMSNorm baseline was 0.1235 to 0.1242 ms. One work-group per row, 128 threads, 2 barriers, x read from global once and normalized from SLM.
 
@@ -828,7 +832,7 @@ Requires `cols % (VEC * CHUNKS_PER_THREAD) == 0` (32 for this shape); keep the n
 
 ## f32 Softmax Core (SLM Row Tile)
 
-Source pattern: `softmax_opt.cpp` from the Softmax-Opti campaign.
+Source pattern: `softmax_opt.cpp`.
 
 Measured 0.107 to 0.109 ms for 1024x4096 f32 on A770; the oneDNN softmax baseline was 0.217 ms. One work-group per row, dynamic work-group size by column count, `vec<float,16>` SLM chunks, one barrier after the SLM load, and `sycl::reduce_over_group(it.get_group(), ...)` for both max and sum.
 
@@ -1024,9 +1028,9 @@ Report `errors=0/<total>` and the per-run average, and repeat at least 3 times t
 
 ## Bandwidth Read-Copy-Reduce Cores
 
-Extracted from `E:\RiderProjects\BandWidth-Opti\src\bandwidth.cpp`. These are
-the standard-SYCL cores used to measure the A770 bandwidth ceilings. The
-benchmark harness around them calibrates iteration count, records three runs,
+These are the standard-SYCL cores used to measure the A770 bandwidth
+ceilings. The benchmark harness around them calibrates iteration count,
+records three runs,
 and keeps >5%-CV configs in `failures.csv`.
 
 ```cpp
@@ -1106,7 +1110,6 @@ messages, and allocate source/destination/out with
 
 ## Execution Graph-Dual-Queue Cores
 
-Extracted from `E:\RiderProjects\KernelExec-Opti\src\execution_model.cpp`.
 `submit_pack`/`submit_gemm` return SYCL profiling events; `event_us` reads
 `command_start`/`command_end`.
 
@@ -1143,7 +1146,6 @@ outside the timed loop; only `execute_graph` belongs inside it.
 
 ## Softmax Fast-Fallback Cores
 
-Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\softmax_bench.cpp`.
 The same SLM-row shape serves the aligned and scalar-chunk paths; the template
 boolean selects `vec<float,16>` loads/stores or per-element fallback.
 
@@ -1240,7 +1242,6 @@ and output are 64 B aligned.
 
 ## GEMV Fast Core
 
-Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\gemv_bench.cpp`.
 One row per sub-group with per-lane trip count derived from the actual
 sub-group size.
 
@@ -1285,7 +1286,6 @@ sub-groups and only half the row would be covered.
 
 ## Sparse CSR-BSR Cores
 
-Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\sparse_gemm_bench.cpp`.
 `N=8`, so each row accumulates into one `float8` output vector.
 
 ```cpp
@@ -1339,10 +1339,9 @@ launch-bound; prefer `B=4` for this shape.
 
 ## Precision Tolerance Helper
 
-Extracted from the verification pattern in
-`E:\RiderProjects\Numerics-Opti\src\numerics.cpp`. The reference is computed
-in f64; the device result is checked with a combined relative/absolute
-tolerance, and the full histogram is kept for precision-switch decisions.
+The reference is computed in f64; the device result is checked with a
+combined relative/absolute tolerance, and the full histogram is kept for
+precision-switch decisions.
 
 ```cpp
 bool close_enough(double got, double want, double rel_tol, double abs_tol) {
@@ -1370,9 +1369,8 @@ Use `rel=0, abs=0` for int8 exact paths, and the tolerance table in
 
 ## Reduction Tree-Atomic Cores
 
-Extracted from `E:\RiderProjects\Reduction-Opti\src\bench.cpp`. The fast
-patterns are a tree with SG reduce plus partials, and a global atomic with one
-atomic per sub-group.
+The fast patterns are a tree with SG reduce plus partials, and a global
+atomic with one atomic per sub-group.
 
 ```cpp
 void launch_tree(sycl::queue& q, const float* x, float* partials, float* out) {
@@ -1449,9 +1447,8 @@ instructions.
 
 ## Scan Hillis-Blelloch Cores
 
-Extracted from `E:\RiderProjects\Reduction-Opti\src\bench.cpp`. Both are
-two-pass WG scans plus an `add_base` kernel; `partials[gid]` receives the WG
-total.
+Both are two-pass WG scans plus an `add_base` kernel; `partials[gid]`
+receives the WG total.
 
 ```cpp
 template <int WG>
@@ -1528,7 +1525,6 @@ the largest per-work-group barrier cost.
 
 ## Attention Online Core
 
-Extracted from `E:\RiderProjects\AttentionConv-Opti\attention\src\attention_ladder.cpp`.
 This is the `run_online` core with Q/K/V staged in SLM and online max/sum
 merged across KV blocks. Constants for the measured shape: `BM=32`, `BN=32`,
 `VLEN=8`, `WG = BM * D/VLEN`.
@@ -1627,7 +1623,6 @@ about 40 KB SLM triggered `UR_RESULT_ERROR_DEVICE_LOST`.
 
 ## Conv Cacheblock Core
 
-Extracted from `E:\RiderProjects\AttentionConv-Opti\conv\src\conv_ladder.cpp`.
 NHWC direct convolution with pre-packed `[KH][KW][IC][OC]` weights and a full
 OC cache block.
 

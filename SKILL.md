@@ -7,9 +7,9 @@ description: "Optimize SYCL/ESIMD compute kernels for Intel Arc/Xe-HPG GPUs (A77
 
 Optimize SYCL/ESIMD kernels on Intel Arc A770 (Xe-HPG/DG2) with measured
 hardware facts, proven technique ladders, known pitfalls, and API usage rules.
-All numbers are single-machine conclusions from oneAPI 2026.1 and driver
-`32.0.101.8724`; re-measure before transferring them to another GPU, driver,
-or compiler.
+All numbers are measured on Intel Arc A770 (DG2) with oneAPI 2026.1 and
+driver `32.0.101.8724` on Windows; re-measure before transferring them to
+another GPU, driver, or compiler.
 
 Measured campaign results include: bf16 GEMM 1.95 ms to 0.0614 ms (about 87%
 of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to 0.215 ms, RMSNorm 5.382 ms to
@@ -138,5 +138,5 @@ Complete evidence: [pitfalls.md](references/workflow/pitfalls.md).
 
 ## References
 
-- Topic map and source project provenance:
+- Topic map and campaign index:
   [references/README.md](references/README.md).

@@ -1,8 +1,6 @@
 # Irregular Shapes and Sparse GEMM on A770
 
 Measured on Intel Arc A770, oneAPI 2026.1, Level-Zero, f32 64 B aligned USM.
-Source project: `E:\RiderProjects\IrregularShapes-Opti`
-(`references\irregular-shapes.md`).
 
 ## Softmax Shape Cost
 
@@ -99,10 +97,8 @@ Rules:
 
 ## Reproduction
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
-```
+Build and run the shape/fallback/sparse benchmarks with the standard oneAPI
+Windows commands in [api-usage.md](../api/api-usage.md).
 
 Copy-ready cores: [softmax fast/fallback](../api/code-snippets.md#softmax-fast-fallback-cores),
 [GEMV fast core](../api/code-snippets.md#gemv-fast-core),

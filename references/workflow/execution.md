@@ -1,8 +1,7 @@
 # A770 Execution Model Reference
 
 Measured on Intel Arc A770, Level-Zero backend, driver `32.0.101.8724`,
-oneAPI 2026.1, VTune 2026.2. Source project:
-`E:\RiderProjects\KernelExec-Opti` (`references\execution-model.md`).
+oneAPI 2026.1, VTune 2026.2.
 
 ## Environment and Task
 
@@ -56,9 +55,8 @@ oneAPI 2026.1, VTune 2026.2. Source project:
 
 ## Reproduction
 
-```powershell
-powershell -ExecutionPolicy Bypass -File scripts\build.ps1
-powershell -ExecutionPolicy Bypass -File scripts\run_benchmarks.ps1 -Variant graph
-```
+Build the two-stage benchmark with the standard oneAPI Windows commands in
+[api-usage.md](../api/api-usage.md), then profile each submission form with
+SYCL events and cross-check graph node times with VTune `xpu-offload`.
 
 Copy-ready cores: [execution graph/dual-queue cores](../api/code-snippets.md#execution-graph-dual-queue-cores).

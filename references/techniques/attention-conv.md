@@ -1,8 +1,6 @@
 # Attention and Convolution Ladders on A770
 
 Measured on Intel Arc A770, oneAPI 2026.1, standard SYCL + USM, f32.
-Source project: `E:\RiderProjects\AttentionConv-Opti`
-(`references\attention-conv.md`).
 
 ## Attention Ladder
 
@@ -81,12 +79,9 @@ Shape: `N=4, IC=32, IH=IW=64, OC=64, KH=KW=3, stride=1`, output
 
 ## Reproduction
 
-```powershell
-.\attention\build.ps1
-.\attention\run.ps1
-.\conv\build.ps1
-.\conv\run.ps1
-```
+Build the attention and conv ladders with the standard oneAPI Windows
+commands in [api-usage.md](../api/api-usage.md); include oneDNN as the conv
+baseline.
 
 Copy-ready cores: [attention online core](../api/code-snippets.md#attention-online-core),
 [conv cache-block core](../api/code-snippets.md#conv-cacheblock-core).

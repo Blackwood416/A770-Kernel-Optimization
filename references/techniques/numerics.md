@@ -1,8 +1,7 @@
 # Numerical Precision and Tolerance Reference
 
 Measured on Intel Arc A770 (Level Zero, driver `32.0.101.8724`), oneAPI
-2026.1, `icx-cl /fsycl /O2 /EHsc`. Source project:
-`E:\RiderProjects\Numerics-Opti` (`references\numerics.md`).
+2026.1, `icx-cl /fsycl /O2 /EHsc`.
 
 ## Method and Scope
 
@@ -98,9 +97,7 @@ Use `err <= rel * |ref| + abs`. Recommended bounds for the measured shapes:
 
 ## Reproduction
 
-```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1
-powershell -ExecutionPolicy Bypass -File run.ps1
-```
+Build and run the precision sweep with the standard oneAPI Windows commands
+in [api-usage.md](../api/api-usage.md).
 
 Copy-ready tolerance helper: [precision tolerance helper](../api/code-snippets.md#precision-tolerance-helper).

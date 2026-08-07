@@ -160,7 +160,7 @@ stream.wait();
 Compile with `/EHsc` and link `dnnl.lib`:
 
 ```bat
-icx-cl /fsycl /EHsc softmax_opt.cpp /I "C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\include" "C:\Program Files (x86)\Intel\oneAPI\dnnl\latest\lib\dnnl.lib" /Fe:softmax_opt.exe
+icx-cl /fsycl /EHsc softmax_opt.cpp /I "%ONEAPI_ROOT%\dnnl\latest\include" "%ONEAPI_ROOT%\dnnl\latest\lib\dnnl.lib" /Fe:softmax_opt.exe
 ```
 
 Always verify the oneDNN output against the CPU softmax reference. The 1024x4096 baseline measured 0.217 ms while 1024x16384 measured 2.64 ms, so re-measure the baseline per shape instead of extrapolating.
@@ -223,8 +223,8 @@ SYCL `dpas` cannot run this mixed f16/u4 shape directly. The stable SYCL fallbac
 Windows oneAPI (user-validated):
 
 ```bat
-cmd /c '"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" && icx-cl /fsycl gemm.cpp /Fe:gemm.exe'
-cmd /c '"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" && gemm.exe'
+cmd /c '"%ONEAPI_ROOT%\setvars.bat" && icx-cl /fsycl gemm.cpp /Fe:gemm.exe'
+cmd /c '"%ONEAPI_ROOT%\setvars.bat" && gemm.exe'
 ```
 
 Large GRF option (measured negative on A770 for joint_matrix and ESIMD; keep only for verification):
@@ -298,8 +298,8 @@ process and let a watchdog capture exit code, timeout, minidumps, and Windows
 Event Log:
 
 ```powershell
-python runner\watchdog.py --suite probes --mode smoke --allow-risk --timeout 15
-python runner\watchdog.py --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
+python <watchdog-script> --suite probes --mode smoke --allow-risk --timeout 15
+python <watchdog-script> --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
 ```
 
 Details and the full safety checklist are in

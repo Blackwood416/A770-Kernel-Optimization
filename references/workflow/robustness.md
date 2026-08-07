@@ -1,18 +1,17 @@
 # A770 Robustness and TDR Protocol
 
-Measured 2026-08-07 on Intel Arc A770, oneAPI 2026.1, driver `32.0.101.8724`.
-Source project: `E:\RiderProjects\Robustness-Opti`
-(`references\robustness.md`).
+Measured on Intel Arc A770, oneAPI 2026.1, driver `32.0.101.8724`.
 
 ## Environment Baseline
 
 - Device: Intel Arc A770, confirmed at runtime.
 - Windows graphics driver: `32.0.101.8724`.
-- oneAPI: `2026.1.0` (build 20260617).
+- oneAPI: `2026.1.0`.
 - Level-Zero: `1.15.37669`.
 
-The version baseline lives in `config\versions.json`; the watchdog reads it
-and flags mismatches in `artifacts\report.json`.
+The watchdog harness pins and checks the version baseline at runtime and
+flags mismatches in its report; the exact file layout is
+implementation-specific.
 
 ## Verified Baselines
 
@@ -62,7 +61,7 @@ no `VIDEO_TDR_FAILURE` and no new system minidump.
 
 Before running:
 
-1. Save all work and confirm `config\versions.json` matches the machine.
+1. Save all work and confirm the pinned version baseline matches the machine.
 2. Close other GPU load: browser acceleration, recording, remote desktop,
    other inference/render programs.
 3. Run baselines first: `--suite baseline --mode smoke`.
@@ -94,11 +93,10 @@ During/after:
 ## Commands
 
 ```powershell
-.\build.ps1
-python runner\watchdog.py --suite baseline --mode smoke --timeout 120
-python runner\watchdog.py --suite probes --mode smoke --allow-risk --timeout 15
-python runner\watchdog.py --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
+python <watchdog-script> --suite baseline --mode smoke --timeout 120
+python <watchdog-script> --suite probes --mode smoke --allow-risk --timeout 15
+python <watchdog-script> --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
 ```
 
-Artifacts: `artifacts\build_status.json`, per-run stdout/stderr/summary,
-minidump copies, and `artifacts\report.json` / `report.md`.
+Artifacts: build status, per-run stdout/stderr/summary, minidump copies, and
+a machine-readable report.

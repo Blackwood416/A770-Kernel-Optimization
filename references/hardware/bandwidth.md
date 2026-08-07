@@ -1,10 +1,8 @@
 # A770 Bandwidth and Roofline Reference
 
 Measured on Intel Arc A770 (DG2), oneAPI 2026.1, driver `32.0.101.8724`,
-Windows 11. All numbers are single-machine conclusions; re-measure before
+Windows 11. All numbers are A770/Windows measurements; re-measure before
 transferring them to another GPU, driver, or compiler.
-
-Source project: `E:\RiderProjects\BandWidth-Opti` (`references\bandwidth.md`).
 
 ## Environment and Method
 
@@ -95,10 +93,8 @@ them.
 
 ## Reproduction
 
-```powershell
-powershell -ExecutionPolicy Bypass -File build.ps1
-cmd /c '"C:\Program Files (x86)\Intel\oneAPI\setvars.bat" >nul && build\bandwidth.exe'
-python scripts/analyze.py
-```
+Build and run the microbenchmark with the standard oneAPI Windows commands
+in [api-usage.md](../api/api-usage.md); the benchmark reports GB/s and keeps
+unstable configs in its own failure log.
 
 Copy-ready microbenchmark core: [bandwidth read/copy/reduce cores](../api/code-snippets.md#bandwidth-read-copy-reduce-cores).
