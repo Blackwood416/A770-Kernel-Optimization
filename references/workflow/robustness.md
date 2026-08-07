@@ -47,6 +47,17 @@ no `VIDEO_TDR_FAILURE` and no new system minidump.
 | batch ESIMD submissions (100+, no wait) | historical driver crash | `q.wait()` crash, possible 0x116 | one-shot stress, collect dump |
 | runtime `if/else` inside ESIMD | hang | no output | use `if constexpr` |
 
+## Rules
+
+1. Always run risky ESIMD shapes in one-shot processes with a watchdog; never
+   run multiple GPU pressure processes at the same time.
+2. Verify stable baselines before probing risks, and snapshot Event Log and
+   minidump state before each round.
+3. Treat any hang, non-zero exit, new minidump, or TDR as evidence and stop
+   stacking more risk probes.
+4. Keep failed variants as standalone source files and record the negative
+   result with driver/oneAPI versions.
+
 ## Safety Checklist
 
 Before running:
