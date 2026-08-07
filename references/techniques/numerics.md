@@ -86,6 +86,16 @@ Use `err <= rel * |ref| + abs`. Recommended bounds for the measured shapes:
 4. Treat fp8 as unavailable on this stack until a SYCL fp8 type and DPAS fp8
    path exist.
 
+## Negative Results
+
+- bf16/bf16 and f16/bf16 accumulators raise reduction error to O(0.1)-O(1);
+  keep the accumulator in f32 for GEMM and reduction kernels.
+- On tiny data, FTZ clears f32/bf16 products that underflow to f32 subnormals,
+  so relative tolerance can report large failures where absolute tolerance is
+  the correct check.
+- fp8 is unusable on A770 + oneAPI 2026.1: no SYCL fp8 type and no Xe-HPG fp8
+  DPAS path.
+
 ## Reproduction
 
 ```powershell

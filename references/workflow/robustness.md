@@ -71,6 +71,15 @@ During/after:
 10. Keep failed variants as standalone source files and record negative
     results; never delete "bad" code.
 
+## Negative Results
+
+- `load_2d<uint32_t,8,8>` hangs the A770 kernel and must be killed by the
+  watchdog (`TIMEOUT_KILLED`).
+- `named_barrier` is rejected at device JIT with "Named barriers are not
+  supported by XeHPG", not at host compile time.
+- The historical 100+ batch ESIMD crash was not reproduced in a controlled
+  600-submission stress run; treat it as a non-deterministic risk.
+
 ## Commands
 
 ```powershell

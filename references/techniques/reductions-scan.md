@@ -77,6 +77,15 @@ expands into many SLM/synchronization instructions.
 4. Fewer, larger work-groups do not automatically win; barrier cost per WG
    grows with WG size.
 
+## Negative Results
+
+- `global_atomic_thread` is 3.8x slower than tree despite having fewer
+  instructions: all threads serialize on one global address.
+- `slm_atomic` adds a local atomic, an extra barrier, and a global atomic per
+  WG without a wall-time win at 1024 WGs.
+- WG512 scans pay the largest per-work-group barrier cost; bigger work-groups
+  did not win.
+
 ## Reproduction
 
 ```powershell

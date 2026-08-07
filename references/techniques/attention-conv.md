@@ -70,6 +70,15 @@ Shape: `N=4, IC=32, IH=IW=64, OC=64, KH=KW=3, stride=1`, output
 6. Output channel stride must equal the output channel count: NCHW output
    uses `OC`; NHWC output uses `OC`. Input layout uses `IC`.
 
+### Conv Negative Results
+
+- Bare NHWC direct conv is about 6x slower than NCHW direct; NHWC only wins
+  with OC cache blocking and the `[KH][KW][IC][OC]` weight layout.
+- im2col+GEMM did not beat the OC64 direct kernel; SLM tile64 was especially
+  bad (2.33 ms) due to occupancy, barriers, and M remainder.
+- `im2col_gemm_tile64_direct` still lost to tile32, so the winner is not
+  simply "SLM vs direct"; tile size dominates on this shape.
+
 ## Reproduction
 
 ```powershell

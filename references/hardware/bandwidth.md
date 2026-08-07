@@ -80,7 +80,7 @@ Ridge point: `26.2 TFLOPS / 277.0 GB/s = 94.7 FLOP/B`.
    in SLM, but verify with wall time because barriers and occupancy can erase
    the SLM advantage.
 
-## Unstable Configs
+## Negative Results (Unstable Configs)
 
 The following configs had run-to-run CV >5% and must not be used as
 performance conclusions:

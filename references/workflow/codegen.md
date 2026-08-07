@@ -68,6 +68,17 @@ Wall time is 100 warmup + 300 timed iterations, 3 repeats, min taken.
    variance; prefer wall time plus `instruction-count` for cross-config
    conclusions.
 
+## Negative Results
+
+- O3, fp-contract=off, fast-math, and large GRF do not change JIT instruction
+  counts on simple bf16 loops; they are neutral or slightly slower.
+- AOT at O2/u1 was neutral: instruction count changed but wall time did not
+  improve.
+- Device-side text LLVM IR is not supported on oneAPI 2026.1; keep bitcode,
+  SPIR-V text, and GEN assembly instead.
+- unroll=4 alone is slower than unroll=2; it only pays off in the
+  O3+fast+AOT+GRF combination.
+
 ## Version Migration Checklist
 
 1. Record the environment fingerprint first: oneAPI version, driver, Level

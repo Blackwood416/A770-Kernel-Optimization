@@ -87,6 +87,16 @@ Rules:
    row-block work-items and is launch-bound. Split large row blocks across
    work-groups instead.
 
+## Negative Results
+
+- Non-16-aligned GEMV fallback is the largest gap: 1025 measured about 34.7x
+  slower than the aligned fast path and 2011 about 41.1x.
+- BSR B16 at M=512 is launch-bound with only 32 row-block work-items and is
+  not a fair tile-size comparison.
+- At the tested gather/scatter lengths (~1-2K), there is no repeatable
+  random-vs-sequential gap; the measurements are launch-bound and do not yet
+  characterize irregular memory behavior.
+
 ## Reproduction
 
 ```powershell
