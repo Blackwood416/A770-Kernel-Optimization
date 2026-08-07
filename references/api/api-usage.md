@@ -12,7 +12,7 @@
 - VTune commands
 - Verification methodology
 
-Cross-reference: every API below is exercised by an embedded snippet in [code-snippets.md](code-snippets.md); measured context for when to use each one is in [techniques.md](techniques.md) and [pitfalls.md](pitfalls.md).
+Cross-reference: every API below is exercised by an embedded snippet in [code-snippets.md](code-snippets.md); measured context for when to use each one is in [techniques.md](../techniques/techniques.md) and [pitfalls.md](../workflow/pitfalls.md).
 
 ## SYCL joint_matrix
 
@@ -303,7 +303,7 @@ python runner\watchdog.py --target risk_batch_esimd --mode stress10 --allow-risk
 ```
 
 Details and the full safety checklist are in
-[robustness.md](workflow/robustness.md).
+[robustness.md](../workflow/robustness.md).
 
 ## Verification Methodology
 

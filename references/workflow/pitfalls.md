@@ -7,7 +7,7 @@
 - Behavioral traps
 - Diagnostic traps
 
-Cross-reference: the code that hits these gates lives in [code-snippets.md](code-snippets.md); API details and commands are in [api-usage.md](api-usage.md).
+Cross-reference: the code that hits these gates lives in [code-snippets.md](../api/code-snippets.md); API details and commands are in [api-usage.md](../api/api-usage.md).
 
 ## API / Hardware Gates
 

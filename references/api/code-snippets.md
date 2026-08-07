@@ -18,23 +18,23 @@
 - f32 GEMV core (sub-group per row, direct L2)
 - f32 RMSNorm core (SLM row tile)
 - f32 Softmax core (SLM row tile)
-- Bandwidth read/copy/reduce cores
-- Execution graph/dual-queue cores
-- Softmax fast/fallback cores
+- Bandwidth read-copy-reduce cores
+- Execution graph-dual-queue cores
+- Softmax fast-fallback cores
 - GEMV fast core
-- Sparse CSR/BSR cores
+- Sparse CSR-BSR cores
 - Precision tolerance helper
-- Reduction tree/atomic cores
-- Scan Hillis-Steele/Blelloch cores
+- Reduction tree-atomic cores
+- Scan Hillis-Blelloch cores
 - Attention online core
-- Conv cache-block core
+- Conv cacheblock core
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
 
 ## Ladder to Snippet Map
 
-Every step of the measured ladder in [techniques.md](techniques.md) maps to embedded code in this file, so the skill stays self-contained without the campaign workspace.
+Every step of the measured ladder in [techniques.md](../techniques/techniques.md) maps to embedded code in this file, so the skill stays self-contained without the campaign workspace.
 
 | Ladder step | Technique | Embedded snippet |
 |---|---|---|
@@ -43,7 +43,7 @@ Every step of the measured ladder in [techniques.md](techniques.md) maps to embe
 | 3 | Register tiling | [Register tiling](#register-tiling) |
 | 4 | SIMD vectorized loads/stores | [SIMD vectorized copies](#simd-vectorized-copies) |
 | 5-6 | joint_matrix direct global / basic SLM | [joint_matrix kernel core](#joint_matrix-kernel-core) |
-| 7 | software prefetch | Negative; see [pitfalls.md](pitfalls.md) and [api-usage.md](api-usage.md) |
+| 7 | software prefetch | Negative; see [pitfalls.md](../workflow/pitfalls.md) and [api-usage.md](api-usage.md) |
 | 8 | double buffer (small tile) | [ESIMD SLM double-buffer skeleton](#esimd-slm-double-buffer-skeleton) |
 | 9-13 | joint_matrix tuned path | [joint_matrix kernel core](#joint_matrix-kernel-core), [VNNI packing](#host-side-vnni-packing-for-bf16-b) |
 | 14 | ESIMD dpas, BK32, 16x16 | [dpas smoke test](#esimd-dpas-smoke-test), [SLM skeleton](#esimd-slm-double-buffer-skeleton) |
@@ -52,9 +52,9 @@ Every step of the measured ladder in [techniques.md](techniques.md) maps to embe
 | 17 | address slimming + 4-buffer B | [4-buffer B pipeline](#fewer-barriers-4-buffer-b-pipeline) |
 | 18 | A SLM relay | [16x16 GEMM core](#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
 
-The f32 RMSNorm ladder lives in [techniques.md](techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); its final kernel is [f32 RMSNorm core](#f32-rmsnorm-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-rmsnorm-baseline).
+The f32 RMSNorm ladder lives in [techniques.md](../techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); its final kernel is [f32 RMSNorm core](#f32-rmsnorm-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-rmsnorm-baseline).
 
-The f32 Softmax ladder lives in [techniques.md](techniques.md#f32-softmax-ladder); its final kernel is [f32 Softmax core](#f32-softmax-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-softmax-baseline).
+The f32 Softmax ladder lives in [techniques.md](../techniques/techniques.md#f32-softmax-ladder); its final kernel is [f32 Softmax core](#f32-softmax-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-softmax-baseline).
 
 ## Naive Baseline
 
@@ -1022,7 +1022,7 @@ for (int i = 0; i < M; i++)
 
 Report `errors=0/<total>` and the per-run average, and repeat at least 3 times to confirm stability before accepting a change.
 
-## Bandwidth Read/Copy/Reduce Cores
+## Bandwidth Read-Copy-Reduce Cores
 
 Extracted from `E:\RiderProjects\BandWidth-Opti\src\bandwidth.cpp`. These are
 the standard-SYCL cores used to measure the A770 bandwidth ceilings. The
@@ -1104,7 +1104,7 @@ Use `(V, Repeats) = (8,1)`, `(16,1)`, `(16,2)`, `(16,4)` for 32/64/128/256 B
 messages, and allocate source/destination/out with
 `sycl::aligned_alloc_device<float>(64, n, q)`.
 
-## Execution Graph/Dual-Queue Cores
+## Execution Graph-Dual-Queue Cores
 
 Extracted from `E:\RiderProjects\KernelExec-Opti\src\execution_model.cpp`.
 `submit_pack`/`submit_gemm` return SYCL profiling events; `event_us` reads
@@ -1141,7 +1141,7 @@ Graph node times are not exposed through SYCL profiling events on oneAPI
 2026.1; cross-check with VTune `xpu-offload`. Rebuild/finalize the graph once
 outside the timed loop; only `execute_graph` belongs inside it.
 
-## Softmax Fast/Fallback Cores
+## Softmax Fast-Fallback Cores
 
 Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\softmax_bench.cpp`.
 The same SLM-row shape serves the aligned and scalar-chunk paths; the template
@@ -1283,7 +1283,7 @@ void gemv_fast(sycl::queue &q, const float *a, const float *x, float *y,
 Do not hardcode `per_lane = nvec / 16`; the A770 compiler may form 32-lane
 sub-groups and only half the row would be covered.
 
-## Sparse CSR/BSR Cores
+## Sparse CSR-BSR Cores
 
 Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\sparse_gemm_bench.cpp`.
 `N=8`, so each row accumulates into one `float8` output vector.
@@ -1366,9 +1366,9 @@ void record_error(double got, double want,
 ```
 
 Use `rel=0, abs=0` for int8 exact paths, and the tolerance table in
-[numerics.md](techniques/numerics.md) after restructure for f32/bf16/f16.
+[numerics.md](../techniques/numerics.md) for f32/bf16/f16.
 
-## Reduction Tree/Atomic Cores
+## Reduction Tree-Atomic Cores
 
 Extracted from `E:\RiderProjects\Reduction-Opti\src\bench.cpp`. The fast
 patterns are a tree with SG reduce plus partials, and a global atomic with one
@@ -1447,7 +1447,7 @@ Never reduce every thread directly to one global address on 4096x4096 f32:
 the measured per-thread atomic variant was 3.8x slower despite fewer
 instructions.
 
-## Scan Hillis-Steele/Blelloch Cores
+## Scan Hillis-Blelloch Cores
 
 Extracted from `E:\RiderProjects\Reduction-Opti\src\bench.cpp`. Both are
 two-pass WG scans plus an `add_base` kernel; `partials[gid]` receives the WG
@@ -1625,7 +1625,7 @@ void run_online(sycl::queue& q, const Config& c, const float* qq,
 Do not raise `BM` to 64 on this shape: `BM=64, BN=32, VLEN=8, WG=512` with
 about 40 KB SLM triggered `UR_RESULT_ERROR_DEVICE_LOST`.
 
-## Conv Cache-Block Core
+## Conv Cacheblock Core
 
 Extracted from `E:\RiderProjects\AttentionConv-Opti\conv\src\conv_ladder.cpp`.
 NHWC direct convolution with pre-packed `[KH][KW][IC][OC]` weights and a full

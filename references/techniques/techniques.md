@@ -20,30 +20,30 @@ All numbers below come from bf16 GEMM, M=1024, N=1536, K=512, on Intel Arc A770,
 - oneMKL baseline: 0.0529 to 0.0537 ms.
 - oneDNN baseline (same machine, same harness): 0.0552 to 0.0559 ms.
 
-Every ladder row links to the embedded code that implements it in [code-snippets.md](code-snippets.md#ladder-to-snippet-map). Original campaign file names are kept there only as provenance; the snippets themselves are self-contained.
+Every ladder row links to the embedded code that implements it in [code-snippets.md](../api/code-snippets.md#ladder-to-snippet-map). Original campaign file names are kept there only as provenance; the snippets themselves are self-contained.
 
 ## The Full Ladder
 
 | Step | Technique | Per-run | Relative to oneMKL | Snippet |
 |---|---|---:|---:|---|
-| 1 | Naive | 1.95174 ms | 2.75% | [naive-baseline](code-snippets.md#naive-baseline) |
-| 2 | SLM tiling | 1.49231 ms | 3.59% | [slm-tiling](code-snippets.md#slm-tiling) |
-| 3 | Register tiling | 0.430648 ms | 12.46% | [register-tiling](code-snippets.md#register-tiling) |
-| 4 | SIMD vectorized loads/stores | 0.273737 ms | 19.61% | [simd-vectorized-copies](code-snippets.md#simd-vectorized-copies) |
-| 5 | joint_matrix direct global | 0.430931 ms | 12.46% | [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) |
-| 6 | joint_matrix + basic SLM | 0.629883 ms | 8.52% | [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) |
-| 7 | + software prefetch | 0.660607 ms | 8.13% | negative, see [pitfalls.md](pitfalls.md) |
-| 8 | + double buffer (small tile) | 0.669505 ms | 8.02% | [esimd-slm-double-buffer-skeleton](code-snippets.md#esimd-slm-double-buffer-skeleton) |
-| 9 | + large tile 64x64 + 16x16 GRF block | 0.356372 ms | 15.07% | [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) |
-| 10 | + hardware-tuned geometry | 0.307633 ms | 17.46% | [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) |
-| 11 | + VNNI-packed B | 0.23417 ms | 22.93% | [host-side-vnni-packing-for-bf16-b](code-snippets.md#host-side-vnni-packing-for-bf16-b) |
-| 12 | + vectorized A load | 0.143731 ms | 37.36% | [simd-vectorized-copies](code-snippets.md#simd-vectorized-copies) + [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) |
-| 13 | + N-first walk + K first/last split | 0.11831 ms | 45.39% | [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) |
-| 14 | ESIMD dpas, BK32, 16x16 tile | 0.0992 ms | about 54% | [esimd-dpas-smoke-test](code-snippets.md#esimd-dpas-smoke-test) + [esimd-slm-double-buffer-skeleton](code-snippets.md#esimd-slm-double-buffer-skeleton) |
-| 15 | + wide SLM->GRF loads | 0.0836 ms | about 63% | [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
-| 16 | + host-side operand layout, A direct read | 0.0734 ms | about 72.5% | [host-side-a-operand-layout-packing-esimd-16x16](code-snippets.md#host-side-a-operand-layout-packing-esimd-16x16) + [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
-| 17 | + address slimming + 4-buffer B + barrier/2K | 0.0628 to 0.0646 ms | about 82% | [fewer-barriers-4-buffer-b-pipeline](code-snippets.md#fewer-barriers-4-buffer-b-pipeline) |
-| 18 | + A SLM relay (cooperative copy) | 0.0613 to 0.0615 ms | about 87% (90% of oneDNN) | [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
+| 1 | Naive | 1.95174 ms | 2.75% | [naive-baseline](../api/code-snippets.md#naive-baseline) |
+| 2 | SLM tiling | 1.49231 ms | 3.59% | [slm-tiling](../api/code-snippets.md#slm-tiling) |
+| 3 | Register tiling | 0.430648 ms | 12.46% | [register-tiling](../api/code-snippets.md#register-tiling) |
+| 4 | SIMD vectorized loads/stores | 0.273737 ms | 19.61% | [simd-vectorized-copies](../api/code-snippets.md#simd-vectorized-copies) |
+| 5 | joint_matrix direct global | 0.430931 ms | 12.46% | [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) |
+| 6 | joint_matrix + basic SLM | 0.629883 ms | 8.52% | [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) |
+| 7 | + software prefetch | 0.660607 ms | 8.13% | negative, see [pitfalls.md](../workflow/pitfalls.md) |
+| 8 | + double buffer (small tile) | 0.669505 ms | 8.02% | [esimd-slm-double-buffer-skeleton](../api/code-snippets.md#esimd-slm-double-buffer-skeleton) |
+| 9 | + large tile 64x64 + 16x16 GRF block | 0.356372 ms | 15.07% | [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) |
+| 10 | + hardware-tuned geometry | 0.307633 ms | 17.46% | [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) |
+| 11 | + VNNI-packed B | 0.23417 ms | 22.93% | [host-side-vnni-packing-for-bf16-b](../api/code-snippets.md#host-side-vnni-packing-for-bf16-b) |
+| 12 | + vectorized A load | 0.143731 ms | 37.36% | [simd-vectorized-copies](../api/code-snippets.md#simd-vectorized-copies) + [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) |
+| 13 | + N-first walk + K first/last split | 0.11831 ms | 45.39% | [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) |
+| 14 | ESIMD dpas, BK32, 16x16 tile | 0.0992 ms | about 54% | [esimd-dpas-smoke-test](../api/code-snippets.md#esimd-dpas-smoke-test) + [esimd-slm-double-buffer-skeleton](../api/code-snippets.md#esimd-slm-double-buffer-skeleton) |
+| 15 | + wide SLM->GRF loads | 0.0836 ms | about 63% | [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](../api/code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
+| 16 | + host-side operand layout, A direct read | 0.0734 ms | about 72.5% | [host-side-a-operand-layout-packing-esimd-16x16](../api/code-snippets.md#host-side-a-operand-layout-packing-esimd-16x16) + [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](../api/code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
+| 17 | + address slimming + 4-buffer B + barrier/2K | 0.0628 to 0.0646 ms | about 82% | [fewer-barriers-4-buffer-b-pipeline](../api/code-snippets.md#fewer-barriers-4-buffer-b-pipeline) |
+| 18 | + A SLM relay (cooperative copy) | 0.0613 to 0.0615 ms | about 87% (90% of oneDNN) | [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](../api/code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads) |
 
 Steps 5-8 were measured negative on that geometry and are recorded so nobody repeats them. Steps 9-13 are the joint_matrix path; steps 14-18 are the ESIMD path that replaced it.
 
@@ -55,14 +55,14 @@ Steps 5-8 were measured negative on that geometry and are recorded so nobody rep
 - Register tiling keeps A/B slices in GRF and accumulates outer products, cutting SLM/global reads per FLOP.
 - Per-thread C tile size controls the compute/load ratio. 16x16 was the ESIMD sweet spot; 16x32 (register pressure) and 16x8 with 64 threads (read amplification) both measured negative.
 
-Code: [naive-baseline](code-snippets.md#naive-baseline), [slm-tiling](code-snippets.md#slm-tiling), [register-tiling](code-snippets.md#register-tiling).
+Code: [naive-baseline](../api/code-snippets.md#naive-baseline), [slm-tiling](../api/code-snippets.md#slm-tiling), [register-tiling](../api/code-snippets.md#register-tiling).
 
 ### Vectorization and XMX
 
 - Vectorized copies (`vec<bf16,4>`, uint32 VNNI words) cut element-wise load instructions by 2-4x.
 - XMX via joint_matrix or ESIMD `dpas` is required to approach library GEMM. VNNI packing B on the host lets the loader copy uint32 words and feeds DPAS the exact operand layout.
 
-Code: [simd-vectorized-copies](code-snippets.md#simd-vectorized-copies), [host-side-vnni-packing-for-bf16-b](code-snippets.md#host-side-vnni-packing-for-bf16-b), [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core), [esimd-dpas-smoke-test](code-snippets.md#esimd-dpas-smoke-test).
+Code: [simd-vectorized-copies](../api/code-snippets.md#simd-vectorized-copies), [host-side-vnni-packing-for-bf16-b](../api/code-snippets.md#host-side-vnni-packing-for-bf16-b), [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core), [esimd-dpas-smoke-test](../api/code-snippets.md#esimd-dpas-smoke-test).
 
 ### Geometry and scheduling
 
@@ -71,14 +71,14 @@ Code: [simd-vectorized-copies](code-snippets.md#simd-vectorized-copies), [host-s
 - N-first walk order swapped the M/N group indices so adjacent work-groups reuse A/B in L2, measured +17%.
 - K first/last split removed a per-block branch; neutral alone but kept.
 
-Code: [joint_matrix-kernel-core](code-snippets.md#joint_matrix-kernel-core) (N-first mapping and K split are in the loop).
+Code: [joint_matrix-kernel-core](../api/code-snippets.md#joint_matrix-kernel-core) (N-first mapping and K split are in the loop).
 
 ### Software pipelining
 
 - Double-buffer SLM: load K block n+1 while computing block n. Only wins when compute per block is large enough; with 32x32 tiles it was slower than the single-buffer baseline.
 - 4-buffer B with one barrier per 2 K blocks halved barrier count (109M to 57M) and was -14%. 8 buffers at 32 KB lost more occupancy than barriers saved and was negative.
 
-Code: [esimd-slm-double-buffer-skeleton](code-snippets.md#esimd-slm-double-buffer-skeleton), [fewer-barriers-4-buffer-b-pipeline](code-snippets.md#fewer-barriers-4-buffer-b-pipeline).
+Code: [esimd-slm-double-buffer-skeleton](../api/code-snippets.md#esimd-slm-double-buffer-skeleton), [fewer-barriers-4-buffer-b-pipeline](../api/code-snippets.md#fewer-barriers-4-buffer-b-pipeline).
 
 ### VTune-driven instruction reduction
 
@@ -94,7 +94,7 @@ The instruction-count profile of the ESIMD 16x16 kernel showed Send 29.0%, Int32
 
 The v8b case is the key counterexample: instruction count went up 26% but time went down because global traffic and latency dropped. Judge a change by wall time plus the profile, not by instruction count alone.
 
-Code: [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads), [host-side-a-operand-layout-packing-esimd-16x16](code-snippets.md#host-side-a-operand-layout-packing-esimd-16x16).
+Code: [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](../api/code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads), [host-side-a-operand-layout-packing-esimd-16x16](../api/code-snippets.md#host-side-a-operand-layout-packing-esimd-16x16).
 
 ## f32 GEMV Ladder (4096x4096, row-major A)
 
@@ -109,7 +109,7 @@ Measured on Intel Arc A770 with the same USM harness (50 warmup + 500 timed laun
 
 Library baselines for the same `y = A*x` operator: oneMKL GPU gemv 0.329 ms, oneDNN GPU matmul `Kx1` 0.380 ms. oneDNN matmul `1xK` measured 0.182 ms but computes `x*A`, which is `A^T*x` for the row-major input, and failed the reference check; always verify the library result before trusting a baseline.
 
-Copy-ready kernel and fallback rule: [f32 GEMV core](code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
+Copy-ready kernel and fallback rule: [f32 GEMV core](../api/code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
 
 ### Why the GEMV steps work
 
@@ -134,7 +134,7 @@ weights `{K,1}` in `ba`, f16 group scales `{groups,1}`, zero-point 8, and
 `fpmath_mode::any`: 0.1456 ms (`jit:gemm:any`). The SYCL kernel is about
 1.65x faster.
 
-Copy-ready kernel and host dequantization: [u4->bf16 GEMV core](code-snippets.md#u4-bf16-gemv-core-sub-group-per-row-bf16-vector--float-accumulator).
+Copy-ready kernel and host dequantization: [u4->bf16 GEMV core](../api/code-snippets.md#u4-bf16-gemv-core-sub-group-per-row-bf16-vector--float-accumulator).
 
 ### Why the u4->bf16 GEMV steps work
 
