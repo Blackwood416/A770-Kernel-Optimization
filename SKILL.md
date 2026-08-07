@@ -1,9 +1,9 @@
 ---
-name: optimize-intel-gpu-kernels
-description: "Optimize SYCL/ESIMD compute kernels for Intel Arc/Xe-HPG GPUs (A770/DG2). Use for dense GEMM/GEMV/RMSNorm/Softmax, irregular and sparse shapes, reductions and scans, attention and convolution, numerical tolerance, bandwidth and roofline analysis, launch/fusion/graph overhead, compiler flags and codegen, VTune interpretation, robustness/TDR isolation, and oneMKL/oneDNN baselines."
+name: optimize-a770-kernels
+description: "Optimize SYCL/ESIMD compute kernels on Intel Arc A770/DG2 (Windows). Use measured constants and dispatch rules only for A770; for other Intel GPUs transfer the methodology only and re-measure all hardware-specific assumptions. Covers dense GEMM/GEMV/RMSNorm/Softmax, irregular and sparse shapes, reductions and scans, attention and convolution, numerical tolerance, bandwidth and roofline, launch/fusion/graph overhead, compiler flags and codegen, VTune interpretation, robustness/TDR isolation, and oneMKL/oneDNN baselines."
 ---
 
-# Intel GPU Kernel Optimization
+# Arc A770 Kernel Optimization
 
 Optimize SYCL/ESIMD kernels on Intel Arc A770 (Xe-HPG/DG2) with measured
 hardware facts, proven technique ladders, known pitfalls, and API usage rules.
@@ -35,6 +35,27 @@ attention/conv campaigns.
    watchdog: [robustness.md](references/workflow/robustness.md).
 6. Verify every change with the workflow below, and record negative results.
 
+## Evidence Levels
+
+Label every claim so a future agent does not promote a single-shape result
+into a universal rule:
+
+- `[ARCH]`: Xe-HPG architectural constraint. Expected to hold for DG2 unless
+  toolchain behavior changes.
+- `[MEASURED]`: A770 / oneAPI 2026.1 / driver `32.0.101.8724` with an exact
+  shape and result.
+- `[HEURISTIC]`: derived from one or more measured campaigns. Use as a
+  starting point, not a dispatch rule.
+- `[DISPATCH]`: validated across a defined shape range. Safe only when every
+  condition in its validity domain holds.
+- `[BUG]`: observed toolchain/driver behavior. Version-specific.
+- `[HYPOTHESIS]`: not sufficiently validated. Must be tested before use.
+
+Every `[DISPATCH]` rule must carry a validity domain: operator, dtype, shape
+range, alignment, tested rows, device, oneAPI version, and confidence. A
+`[MEASURED]` result that is used outside its measured shape must be
+re-labeled `[HEURISTIC]`.
+
 ## Workflow
 
 1. Build the correctness harness first: CPU reference, `errors: 0/...`,
@@ -48,6 +69,40 @@ attention/conv campaigns.
    variants as standalone files.
 5. Verify every variant: exact reference compare, 3 stable values, and the
    VTune metrics that motivated the change.
+
+## Benchmark Protocol
+
+Use one timing protocol for new experiments so campaigns can be compared:
+
+```text
+warmup: operator-specific
+samples: >= 20 batch measurements
+reported: median
+dispersion: p10/p90 or MAD
+reject/flag: CV > threshold
+
+device_time: SYCL event profiling (command_start/command_end)
+wall_time: host submit -> wait completion
+pipeline_time: preprocessing + operator + postprocess
+```
+
+For kernels near or below 10 us, always report device time and wall time
+separately; launch/host overhead can dominate.
+
+## oneDNN Baseline Contract
+
+Every oneDNN baseline must record:
+
+- operator semantics and primitive kind
+- implementation string (`jit:gemm:any`, `ocl:ref:any`, ...)
+- format tags and src/weight/dst dtypes
+- post-ops and `fpmath_mode`
+- runtime/static dims, reorder/preprocessing included
+- device time, wall time, and CPU-reference correctness
+
+Enable `ONEDNN_VERBOSE=profile,dispatch` and keep the implementation string;
+it distinguishes "won against a JIT kernel" from "oneDNN fell back to a
+reference path".
 
 ## Hardware Quick Facts
 
@@ -69,33 +124,43 @@ Full hardware details and measured bandwidth/stride tables:
 
 ## Decision Branches
 
-- Dense GEMM: bf16 16x16 ESIMD DPAS with host-side operand layout was the
-  best stable SYCL path; joint_matrix is the portable fallback. See
+- Dense GEMM: `[MEASURED]` bf16 1024x1536x512: ESIMD DPAS with host-side
+  operand layout was the best stable SYCL path; joint_matrix is the portable
+  fallback. See
   [techniques.md](references/techniques/techniques.md#the-full-ladder).
-- GEMV: sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
-  derived from the actual sub-group size. See
+- GEMV: `[MEASURED]` f32 4096x4096 standard-SYCL champion is
+  sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
+  derived from the actual sub-group size; the ESIMD crossover is pending
+  measurement. See
   [techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a).
-- Row reductions (RMSNorm/Softmax): stage the row in SLM and normalize from
-  SLM; shrink WG size for short rows. See
+- Row reductions (RMSNorm/Softmax): `[MEASURED]` f32 1024x4096: stage the row
+  in SLM and normalize from SLM; shrink WG size for short rows. Low-row
+  decode shapes are pending measurement. See
   [techniques.md](references/techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32).
-- Irregular/sparse: CSR for >=90% sparsity, BSR B4 for about 50%, scalar-chunk
-  fallback for non-16-aligned shapes. See
+- Irregular/sparse: `[HEURISTIC]` from `M=K=512, N=8, f32`: CSR for >=90%
+  sparsity, BSR B4 for about 50%, scalar-chunk fallback for non-16-aligned
+  shapes. See
   [irregular-shapes.md](references/techniques/irregular-shapes.md).
-- Reduction/scan: global atomic (one per sub-group) or tree for full sums;
-  WG64 Hillis-Steele for scans. See
+- Reduction/scan: `[MEASURED]` 4096x4096 f32 full sums and 1M f32
+  one-element-per-lane scans: global atomic (one per sub-group) or tree;
+  WG64 Hillis-Steele is a starting point. See
   [reductions-scan.md](references/techniques/reductions-scan.md).
-- Attention/conv: naive three-kernel attention wins on small shapes; NHWC
-  conv wins only with OC cache blocking. See
+- Attention/conv: `[MEASURED]` small f32 prefill shape `B=4 H=16 Q=128
+  KV=256 D=64`: naive three-kernel attention wins; decode attention is
+  pending. NHWC conv wins only with OC cache blocking. See
   [attention-conv.md](references/techniques/attention-conv.md).
-- Numerics: keep f32 accumulators for bf16/f16; use combined relative/absolute
-  tolerances. See [numerics.md](references/techniques/numerics.md).
-- Execution: fuse only when `fused device delta < launch gap + host overhead
-  saved`; reuse graphs for repeated small pipelines. See
+- Numerics: `[MEASURED]` small f32/bf16/f16/int8 shapes: keep f32 accumulators
+  for bf16/f16 and use combined relative/absolute tolerances. See
+  [numerics.md](references/techniques/numerics.md).
+- Execution: `[MEASURED]` pack+GEMM 1024x1536x512: fuse only when
+  `fused device delta < launch gap + host overhead saved`; reuse graphs for
+  repeated small pipelines. See
   [execution.md](references/workflow/execution.md).
-- Codegen: O2 auto-vectorizes simple bf16 loops; try explicit unroll=2 before
-  flags. See [codegen.md](references/workflow/codegen.md).
-- Risk isolation: `load_2d` hangs, `named_barrier` is rejected at device JIT,
-  and large SLM geometries can trigger device loss. See
+- Codegen: `[MEASURED]` simple non-XMX bf16 loops: O2 auto-vectorizes; try
+  explicit unroll=2 before flags. See [codegen.md](references/workflow/codegen.md).
+- Risk isolation: `[BUG]` driver/oneAPI-version-specific: `load_2d` hangs,
+  `named_barrier` is rejected at device JIT, and large SLM geometries can
+  trigger device loss. See
   [robustness.md](references/workflow/robustness.md).
 
 ## Curated Pitfalls
@@ -139,4 +204,4 @@ Complete evidence: [pitfalls.md](references/workflow/pitfalls.md).
 ## References
 
 - Topic map and campaign index:
-  [references/README.md](references/README.md).
+  [references/index.md](references/index.md).

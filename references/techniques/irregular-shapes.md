@@ -2,6 +2,10 @@
 
 Measured on Intel Arc A770, oneAPI 2026.1, Level-Zero, f32 64 B aligned USM.
 
+> Evidence: `[MEASURED]` f32 softmax rows=64 cols 256-4096; GEMV M=64/M=96
+> cols 256-4096; sparse GEMM `M=K=512, N=8`. The sparse and fallback rules
+> are `[HEURISTIC]` outside these domains.
+
 ## Softmax Shape Cost
 
 Rows fixed at 64. `fast` is the 64 B aligned `vec<float,16>` SLM path,
@@ -21,9 +25,9 @@ oneDNN uses `softmax_accurate`, axis=1. Times are us/run.
 
 Rules:
 
-1. Fast path only for `cols % 16 == 0 && cols >= 512`. For `cols <= 256`, the
-   vector path can be slower than fallback because launch/wave overhead
-   dominates.
+1. `[HEURISTIC]` fast path only for `cols % 16 == 0 && cols >= 512`. For
+   `cols <= 256`, the vector path can be slower than fallback because
+   launch/wave overhead dominates.
 2. WG sizing: 16 threads for `cols <= 256`, 32 for `cols <= 1024`, 128
    otherwise.
 3. Non-16-aligned or short rows use the scalar-chunk SLM fallback, never the
@@ -50,8 +54,9 @@ oneDNN baseline is `Kx1` matmul, verified against the CPU reference.
 
 Rules:
 
-1. Fast path requires `M % 32 == 0 && N % 16 == 0`; never hardcode a 16-lane
-   per-lane trip count because A770 may compile with 32-lane sub-groups.
+1. `[HEURISTIC]` fast path requires `M % 32 == 0 && N % 16 == 0`; never
+   hardcode a 16-lane per-lane trip count because A770 may compile with
+   32-lane sub-groups.
 2. Non-16-aligned GEMV is the largest fallback gap: 1025 is about `34.7x`
    slower than the aligned fast path and 2011 is about `41.1x`. If such shapes
    are common, add a padded/tail-vector fast path instead of staying scalar.
@@ -77,13 +82,15 @@ traverses nnz, dense filter scans all elements, BSR tiles use
 
 Rules:
 
-1. `sparsity >= 90%`: CSR direct traversal.
-2. `sparsity ~50%`: BSR B4 with `vec<float,8>` output accumulation.
+1. `[HEURISTIC]` (`M=K=512, N=8, f32`) `sparsity >= 90%`: CSR direct
+   traversal.
+2. `[HEURISTIC]` (`M=K=512, N=8, f32`) `sparsity ~50%`: BSR B4 with
+   `vec<float,8>` output accumulation.
 3. Dense filter is a last resort: it scans the full dense matrix even at 99%
    sparsity.
-4. Avoid BSR tiles that leave too few work-items: at `M=512`, B16 has only 32
-   row-block work-items and is launch-bound. Split large row blocks across
-   work-groups instead.
+4. `[MEASURED]` avoid BSR tiles that leave too few work-items: at `M=512`,
+   B16 has only 32 row-block work-items and is launch-bound. Split large row
+   blocks across work-groups instead.
 
 ## Negative Results
 

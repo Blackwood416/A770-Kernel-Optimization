@@ -1,5 +1,9 @@
 # Measured Optimization Ladder
 
+> Evidence: `[MEASURED]` per-section shapes on A770 / oneAPI 2026.1 / driver
+> `32.0.101.8724`. Treat any rule as `[HEURISTIC]` outside its measured
+> shape/dtype domain until re-measured.
+
 ## Table of Contents
 
 - Benchmark context and baselines

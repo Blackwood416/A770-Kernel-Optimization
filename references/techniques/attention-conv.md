@@ -2,6 +2,10 @@
 
 Measured on Intel Arc A770, oneAPI 2026.1, standard SYCL + USM, f32.
 
+> Evidence: `[MEASURED]` attention `B=4, H=16, Q=128, KV=256, D=64` f32;
+> conv `N=4, IC=32, IH=IW=64, OC=64, 3x3` f32. Rules are `[HEURISTIC]` for
+> decode attention, GQA/MQA, paged KV, and other conv shapes.
+
 ## Attention Ladder
 
 Shape: `B=4, H=16, Q=128, KV=256, D=64, kv_start=128`, causal except
@@ -21,8 +25,8 @@ On this small f32 shape the naive three-kernel path is still the fastest
 because it has the most parallelism and S/P fit in L2. The flash-style
 variants prove the online/causal/KV-cache structures are correct and stable,
 and the earlier one-row-per-thread version was reduced from about 23 ms to
-about 2 ms. For `seq <= 256` without an O(QKV) memory bound, prefer naive or
-the library baseline.
+about 2 ms. `[HEURISTIC]` for `seq <= 256` without an O(QKV) memory bound,
+prefer naive or the library baseline; decode attention needs its own sweep.
 
 ### Attention Negative Results
 
@@ -54,14 +58,17 @@ Shape: `N=4, IC=32, IH=IW=64, OC=64, KH=KW=3, stride=1`, output
 
 ### Conv Rules
 
-1. The SYCL winner is `direct_nhwc_cacheblock_oc64` at `0.1605 ms`; oneDNN
-   `0.0935 ms` remains the same-operator baseline.
-2. NHWC only pays off with OC cache blocking and `[KH][KW][IC][OC]` weight
-   layout; bare NHWC direct is about 6x slower than NCHW direct.
-3. Enlarging the OC cache block from 16 to 64 cut time from `0.298` to
-   `0.160 ms` by increasing input reuse per thread.
-4. im2col+GEMM did not beat OC64 direct on this shape. Use GEMM tile32, not
-   SLM tile64; the latter loses to SLM occupancy, barriers, and M remainder.
+1. `[MEASURED]` (`N=4, IC=32, 64x64, OC=64, 3x3, f32`) the SYCL winner is
+   `direct_nhwc_cacheblock_oc64` at `0.1605 ms`; oneDNN `0.0935 ms` remains
+   the same-operator baseline.
+2. `[HEURISTIC]` NHWC only pays off with OC cache blocking and
+   `[KH][KW][IC][OC]` weight layout; bare NHWC direct was about 6x slower
+   than NCHW direct in this campaign.
+3. `[MEASURED]` enlarging the OC cache block from 16 to 64 cut time from
+   `0.298` to `0.160 ms` by increasing input reuse per thread.
+4. `[MEASURED]` im2col+GEMM did not beat OC64 direct on this shape. Use GEMM
+   tile32, not SLM tile64; the latter loses to SLM occupancy, barriers, and M
+   remainder.
 5. The GEMM matrix width is `OC=64`, not batch `N=4`; im2col K is
    `[KH][KW][IC]`, matching `w_hwio`. These are the two classic correctness
    traps.

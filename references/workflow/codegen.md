@@ -3,6 +3,10 @@
 Measured on Intel Arc A770, oneAPI 2026.1 (`icpx`), driver `32.0.101.8724`,
 VTune 2026.2.
 
+> Evidence: `[MEASURED]` simple non-XMX bf16 kernels, GEMM `1024x1536x512`
+> and RMSNorm `1024x4096`; conclusions do not transfer to XMX/barrier-heavy
+> kernels without re-measuring.
+
 ## Fixed Kernels
 
 The sweep uses deliberately simple, non-XMX standard-SYCL kernels, so

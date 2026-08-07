@@ -4,6 +4,9 @@ Measured on Intel Arc A770 (DG2), oneAPI 2026.1, driver `32.0.101.8724`,
 Windows 11. All numbers are A770/Windows measurements; re-measure before
 transferring them to another GPU, driver, or compiler.
 
+> Evidence: `[MEASURED]` f32 standard-SYCL kernels over 64 B aligned USM,
+> 4096 workers, message widths 32-256 B, strides 1/16/256 float elements.
+
 ## Environment and Method
 
 - f32 SYCL kernels over 64 B aligned USM: global read, global copy, global
@@ -31,8 +34,9 @@ transferring them to another GPU, driver, or compiler.
 | SLM read | 256 B messages | 4115.8 | True |
 | SLM write | 256 B messages | 5413.4 | False |
 
-Copy GB/s counts read plus write bytes, so `328.8 GB/s` is about `657.6 GB/s`
-of bidirectional DRAM traffic.
+Copy GB/s counts read plus write bytes (the benchmark doubles the source
+payload), so `328.8 GB/s` is already the aggregate bidirectional traffic; do
+not double it again.
 
 ## Message Width Cost (stride 256 el = 1024 B)
 

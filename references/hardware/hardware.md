@@ -13,7 +13,7 @@
 
 | Spec | Value | Implication |
 |---|---|---|
-| Hardware thread count | 4096 | Align total kernel threads to multiples of 4096 for full waves |
+| Hardware thread count | 4096 | Standard SYCL: align hardware-thread waves, not work-item counts; ESIMD occupancy is work-item-based |
 | Hardware threads per vector engine | 8 | Regular GRF mode |
 | Hardware threads per vector engine (large GRF) | 4 | Large GRF halves occupancy |
 | GRF per thread | 128 regular / 256 large | Keep register budget with headroom; 64/128 was the 16x16 GEMM sweet spot |
@@ -50,9 +50,19 @@
 
 ## Occupancy Math and Measured Sweet Spots
 
-- Total threads = work-group count x work-group size. Align the product to a multiple of 4096; 24 full waves was the best measured joint_matrix geometry.
-- joint_matrix sweet spot: BM=128, BN=64, BK=16, 512-thread work-group, GRF usage about 64/128.
-- ESIMD final sweet spot: 32 threads/work-group x 16x16 per-thread C tile, A 2x8 KB + B 2x4 KB SLM (24 KB total).
+- Standard SYCL mapping: a work-item is a SIMD lane, a sub-group is one SIMD
+  hardware thread, and `HW threads per WG = WG_size / SG_size`. For full
+  waves, align `WG_count * WG_size / SG_size` to 4096, not
+  `WG_count * WG_size`. The compiler may pick SG=32 even when the kernel was
+  written for 16.
+- ESIMD mapping: an ESIMD work-item explicitly owns a SIMD vector, so do not
+  reuse standard-SYCL occupancy arithmetic blindly. Count ESIMD work-items
+  and confirm with VTune occupancy.
+- Measured joint_matrix geometry (standard SYCL): BM=128, BN=64, BK=16,
+  512-thread work-group, GRF usage about 64/128; 24 full waves was the best
+  measured geometry with the actual sub-group mapping.
+- Measured ESIMD geometry: 32 threads/work-group x 16x16 per-thread C tile,
+  A 2x8 KB + B 2x4 KB SLM (24 KB total).
 - With A read directly from global, 4-buffer B SLM (16 KB) and one barrier per 2 K blocks was best.
 - SLM per work-group above about 32 KB starts losing resident work-groups (8-buffer B at 32 KB measured negative).
 - Higher occupancy is not the goal by itself: oneDNN ran at 28.7% occupancy and beat an ESIMD variant at 58.4% because it issued fewer instructions.

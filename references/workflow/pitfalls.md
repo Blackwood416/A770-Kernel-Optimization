@@ -1,5 +1,9 @@
 # A770 Pitfalls and Negative Results
 
+> Labels: `[BUG]` for toolchain/driver behavior (version-specific), and
+> `[MEASURED]` for shape-specific negative results. Do not promote a
+> single-shape failure to a universal rule without a validity domain.
+
 ## Table of Contents
 
 - API / hardware gates

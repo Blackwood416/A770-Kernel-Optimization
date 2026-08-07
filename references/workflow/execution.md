@@ -3,6 +3,9 @@
 Measured on Intel Arc A770, Level-Zero backend, driver `32.0.101.8724`,
 oneAPI 2026.1, VTune 2026.2.
 
+> Evidence: `[MEASURED]` pack + bf16 joint-matrix GEMM, `1024x1536x512`,
+> CPU f32 reference, 30 warmup + 200 timed iterations, 3 stable runs.
+
 ## Environment and Task
 
 - Two-stage task: VNNI pack of B plus a joint-matrix bf16 GEMM,

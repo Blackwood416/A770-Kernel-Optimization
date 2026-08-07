@@ -1,5 +1,8 @@
 # Reference Index
 
+Evidence labels (`[ARCH]`, `[MEASURED]`, `[HEURISTIC]`, `[DISPATCH]`, `[BUG]`,
+`[HYPOTHESIS]`) are defined in `SKILL.md`.
+
 All measured numbers in this skill come from an Intel Arc A770 (DG2) running
 Windows 11 with oneAPI 2026.1 and driver `32.0.101.8724`. Re-measure before
 transferring conclusions to another GPU, driver, or compiler.

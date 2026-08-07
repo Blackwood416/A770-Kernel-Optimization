@@ -3,6 +3,10 @@
 Measured on Intel Arc A770 (Level Zero, driver `32.0.101.8724`), oneAPI
 2026.1, `icx-cl /fsycl /O2 /EHsc`.
 
+> Evidence: `[MEASURED]` GEMM `256x256x256`, Softmax `256x1024`, row reduce
+> `256x4096`, f32/bf16/f16/int8. Tolerances are starting points
+> (`[HEURISTIC]`) for other shapes and data distributions.
+
 ## Method and Scope
 
 - Shapes: GEMM `256x256x256`; Softmax `256x1024`; row reduction `256x4096`.

@@ -1,4 +1,4 @@
 interface:
-  display_name: "Intel GPU Kernel Optimization"
-  short_description: "Optimize Intel GPU SYCL/ESIMD kernels on Arc A770"
-  default_prompt: "Use $optimize-intel-gpu-kernels to optimize this Intel GPU SYCL/ESIMD kernel and verify correctness and performance."
+  display_name: "Arc A770 Kernel Optimization"
+  short_description: "Optimize SYCL/ESIMD kernels on Intel Arc A770/DG2"
+  default_prompt: "Use $optimize-a770-kernels to optimize this A770 SYCL/ESIMD kernel and verify correctness and performance."

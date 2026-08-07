@@ -5,6 +5,10 @@ times are 3-run averages with 20 warmup + 200 timed launches; all outputs
 pass the CPU reference. VTune uses `instruction-count`; its sampled wall
 times are inflated and only instruction mixes are compared.
 
+> Evidence: `[MEASURED]` full reduction `4096x4096` f32 and 1M f32
+> one-element-per-lane work-group scans. WG64 and Hillis-Steele preferences
+> are `[HEURISTIC]` for other scan widths and element-per-lane counts.
+
 ## Full-Tensor Reduction on 4096x4096 f32
 
 | Variant | Avg ms | Notes |
@@ -68,9 +72,9 @@ expands into many SLM/synchronization instructions.
 
 ### Scan
 
-1. Start with WG64 for one-element-per-lane work-group scans.
-2. Prefer Hillis-Steele for small WG scans: lower barrier and instruction
-   counts at every measured WG size.
+1. `[HEURISTIC]` start with WG64 for one-element-per-lane work-group scans.
+2. `[MEASURED]` prefer Hillis-Steele for small WG scans: lower barrier and
+   instruction counts at every measured WG size.
 3. Use Blelloch only when each lane scans multiple elements locally first;
    otherwise its `O(n log n)` work has nothing to amortize.
 4. Fewer, larger work-groups do not automatically win; barrier cost per WG

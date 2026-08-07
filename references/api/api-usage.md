@@ -1,5 +1,10 @@
 # API Usage Guide
 
+> Baseline contract: every oneDNN baseline must record the implementation
+> string (`jit:gemm:any`, `ocl:ref:any`, ...), format tags, dtypes, post-ops,
+> fpmath mode, dims, reorder/preprocessing, device time, wall time, and CPU
+> reference correctness. See the oneDNN Baseline Contract in SKILL.md.
+
 ## Table of Contents
 
 - SYCL joint_matrix
@@ -314,3 +319,5 @@ Details and the full safety checklist are in
 5. Keep failed variants as standalone files and record the negative result with baseline numbers; they are the controls for future claims.
 6. Verify library baselines with the same CPU reference before trusting their timings; oneDNN `1xK` matmul is `x*A`, not row-major `A*x`.
 7. For steady-state GEMV timing, copy inputs into aligned USM once, warm up, then time the launch loop; a buffer-backed first launch can include host-to-device transfer.
+8. Record the oneDNN implementation string by setting `ONEDNN_VERBOSE=profile,dispatch` before the run; save `jit:gemm:any` vs `ocl:ref:any` with the result.
+9. Follow the unified Benchmark Protocol in SKILL.md: report median, p10/p90 or MAD, flag CV, and separate device time, wall time, and pipeline time.
