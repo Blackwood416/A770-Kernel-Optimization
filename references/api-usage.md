@@ -270,6 +270,20 @@ Read these metrics: GPU time per kernel, ALU0/ALU1 instructions, Send instructio
 
 Copy-ready forms: [execution graph/dual-queue cores](code-snippets.md#execution-graph-dual-queue-cores).
 
+## Robustness Harness
+
+Before running new ESIMD kernel shapes, isolate each variant in its own
+process and let a watchdog capture exit code, timeout, minidumps, and Windows
+Event Log:
+
+```powershell
+python runner\watchdog.py --suite probes --mode smoke --allow-risk --timeout 15
+python runner\watchdog.py --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
+```
+
+Details and the full safety checklist are in
+[robustness.md](workflow/robustness.md).
+
 ## Verification Methodology
 
 1. Run 100 warmup iterations, then 1000 timed iterations with `q.wait()`, and report the average.

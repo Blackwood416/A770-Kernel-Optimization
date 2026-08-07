@@ -114,6 +114,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - fp8 is not usable on this stack: oneAPI 2026.1 has no SYCL fp8 type and Xe-HPG has no fp8 DPAS path.
 - One global atomic per thread is the wrong reduction shape at 4096x4096 f32: `global_atomic_thread` had the lowest instruction count but was 3.8x slower than tree because all atomics serialize on one address.
 - Larger scan work-groups do not automatically win: A770 barriers expand into many synchronization instructions, and WG512 paid the largest per-group cost. WG64 was the measured sweet spot.
+- `named_barrier` on A770 is a runtime device-JIT gate, not a host compile gate: oneAPI 2026.1 compiles the kernel and then rejects it with "Named barriers are not supported by XeHPG".
+- The historical 100+ batch ESIMD driver crash was not reproduced in a controlled 600-submission stress run on driver 32.0.101.8724. Treat it as a non-deterministic risk and keep running one target per process.
 
 ## Diagnostic Traps
 
