@@ -106,6 +106,9 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - On the joint-matrix pack+GEMM kernel, `sub_group_size<16>` and `reqd_sub_group_size(16)` trigger an IGC internal divide-by-zero on oneAPI 2026.1; use the measured 2D `(8, 64)` local mapping instead.
 - The second 8-column B slice of a joint-matrix GEMM is 8 `uint32` words past the first slice, i.e. `+16 bf16` after casting to `bf16*`; `+8 bf16` silently produces half-wrong output columns.
 - Fusing a pack kernel into GEMM is not always a win. Measured fused added 93 us of device time and removed only 46 us of launch gap plus host overhead, so it lost 47 us per iteration. Fuse only when `fused device delta < launch gap + host overhead saved`.
+- The softmax vector fast path only wins from about 512 columns on A770; for short rows (<=256 cols) the scalar-chunk fallback can be faster because launch/wave overhead dominates.
+- Non-16-aligned GEMV is the largest irregular-shape gap: 1025 columns measured about 34.7x slower than the aligned fast path and 2011 about 41.1x. Add a padded/tail-vector fast path when such shapes are common.
+- BSR tile size must keep enough row-block work-items. At M=512, B16 leaves only 32 work-items and is launch-bound; B4 was the measured sweet spot for 50% sparsity.
 
 ## Diagnostic Traps
 

@@ -1,0 +1,99 @@
+# Irregular Shapes and Sparse GEMM on A770
+
+Measured on Intel Arc A770, oneAPI 2026.1, Level-Zero, f32 64 B aligned USM.
+Source project: `E:\RiderProjects\IrregularShapes-Opti`
+(`references\irregular-shapes.md`).
+
+## Softmax Shape Cost
+
+Rows fixed at 64. `fast` is the 64 B aligned `vec<float,16>` SLM path,
+`fallback` is the scalar-chunk SLM path, `naive` is one work-item per row.
+oneDNN uses `softmax_accurate`, axis=1. Times are us/run.
+
+| cols | fast vec | fallback scalar | naive row | oneDNN |
+|---:|---:|---:|---:|---:|
+| 256 | 17.827 | 14.708 | 136.027 | 28.307 |
+| 512 | 10.513 | 15.152 | 266.288 | 14.145 |
+| 1024 | 15.413 | 24.901 | 557.034 | 23.360 |
+| 1025 | N/A | 18.039 | 1099.013 | 18.362 |
+| 2048 | 11.522 | 23.500 | 1103.938 | 35.781 |
+| 2011 | N/A | 23.302 | 2205.647 | 21.617 |
+| 4096 | 17.930 | 37.416 | 2201.133 | 31.789 |
+| 1536 runtime | 14.295 | 20.256 | 825.093 | 33.938 |
+
+Rules:
+
+1. Fast path only for `cols % 16 == 0 && cols >= 512`. For `cols <= 256`, the
+   vector path can be slower than fallback because launch/wave overhead
+   dominates.
+2. WG sizing: 16 threads for `cols <= 256`, 32 for `cols <= 1024`, 128
+   otherwise.
+3. Non-16-aligned or short rows use the scalar-chunk SLM fallback, never the
+   naive row-per-item kernel.
+4. Rows above 8192 cols: read max directly from global and stage only sum +
+   normalize tiles in SLM.
+
+## GEMV Shape Cost
+
+Default `M=64`; dynamic case `M=96, N=1536`. `fast` is sub-group-per-row with
+`vec<float,16>` and per-lane trip counts from the actual sub-group size.
+oneDNN baseline is `Kx1` matmul, verified against the CPU reference.
+
+| cols | fast vec16 | scalar row | oneDNN Kx1 |
+|---:|---:|---:|---:|
+| 256 | 12.609 | 49.162 | 37.215 |
+| 512 | 10.919 | 93.486 | 37.562 |
+| 1024 | 16.895 | 183.849 | 33.812 |
+| 1025 | N/A | 586.166 | 23.845 |
+| 2048 | 28.239 | 355.590 | 42.048 |
+| 2011 | N/A | 1159.231 | 58.487 |
+| 4096 | 51.445 | 709.487 | 40.890 |
+| 1536 runtime | 24.702 | 268.388 | 42.696 |
+
+Rules:
+
+1. Fast path requires `M % 32 == 0 && N % 16 == 0`; never hardcode a 16-lane
+   per-lane trip count because A770 may compile with 32-lane sub-groups.
+2. Non-16-aligned GEMV is the largest fallback gap: 1025 is about `34.7x`
+   slower than the aligned fast path and 2011 is about `41.1x`. If such shapes
+   are common, add a padded/tail-vector fast path instead of staying scalar.
+
+## Gather / Scatter
+
+At lengths 1024/1025/2048/2011/1536 with unique permutation indices, gather
+and scatter times sit at about 17-20 us with no repeatable random-vs-sequential
+gap. This size is launch-bound; use hundreds of thousands of elements plus
+`vec`/coalesced control variables before drawing memory-behavior conclusions.
+
+## Sparse GEMM
+
+Operator: `C[M,N] = A[M,K] * B[K,N]`, `M=K=512`, `N=8`, f32. CSR direct
+traverses nnz, dense filter scans all elements, BSR tiles use
+`vec<float,8>` multiply-add.
+
+| sparsity | CSR direct | dense filter | BSR B4 | BSR B8 | BSR B16 |
+|---:|---:|---:|---:|---:|---:|
+| 50% | 297.958 | 245.994 | 168.290 | 260.401 | 1359.107 |
+| 90% | 65.121 | 246.569 | 143.852 | 255.997 | 1359.031 |
+| 99% | 30.945 | 153.391 | 38.005 | 166.977 | 1402.758 |
+
+Rules:
+
+1. `sparsity >= 90%`: CSR direct traversal.
+2. `sparsity ~50%`: BSR B4 with `vec<float,8>` output accumulation.
+3. Dense filter is a last resort: it scans the full dense matrix even at 99%
+   sparsity.
+4. Avoid BSR tiles that leave too few work-items: at `M=512`, B16 has only 32
+   row-block work-items and is launch-bound. Split large row blocks across
+   work-groups instead.
+
+## Reproduction
+
+```powershell
+powershell -ExecutionPolicy Bypass -File scripts\build.ps1
+powershell -ExecutionPolicy Bypass -File scripts\run_all.ps1
+```
+
+Copy-ready cores: [softmax fast/fallback](../api/code-snippets.md#softmax-fast-fallback-cores),
+[GEMV fast core](../api/code-snippets.md#gemv-fast-core),
+[sparse CSR/BSR cores](../api/code-snippets.md#sparse-csr-bsr-cores).

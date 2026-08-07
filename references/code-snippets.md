@@ -20,6 +20,9 @@
 - f32 Softmax core (SLM row tile)
 - Bandwidth read/copy/reduce cores
 - Execution graph/dual-queue cores
+- Softmax fast/fallback cores
+- GEMV fast core
+- Sparse CSR/BSR cores
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -1132,3 +1135,199 @@ double gap_us = event_gap_us(ep, eg);
 Graph node times are not exposed through SYCL profiling events on oneAPI
 2026.1; cross-check with VTune `xpu-offload`. Rebuild/finalize the graph once
 outside the timed loop; only `execute_graph` belongs inside it.
+
+## Softmax Fast/Fallback Cores
+
+Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\softmax_bench.cpp`.
+The same SLM-row shape serves the aligned and scalar-chunk paths; the template
+boolean selects `vec<float,16>` loads/stores or per-element fallback.
+
+```cpp
+constexpr int VEC = 16;
+
+template <bool Aligned, int Threads>
+void softmax_slm_impl(sycl::queue &q, const float *x, float *y, int rows,
+                      int cols) {
+    const std::size_t chunks =
+        Aligned ? cols / VEC : (cols + VEC - 1) / VEC;
+    q.submit([&](sycl::handler &h) {
+        sycl::local_accessor<sycl::vec<float, VEC>, 1> tile(
+            sycl::range<1>(chunks), h);
+        h.parallel_for(
+            sycl::nd_range<1>(sycl::range<1>(rows * Threads),
+                              sycl::range<1>(Threads)),
+            [=](sycl::nd_item<1> it) {
+                const std::size_t row = it.get_group(0);
+                const std::size_t tid = it.get_local_linear_id();
+                const float *row_in = x + row * cols;
+                float *row_out = y + row * cols;
+
+                for (std::size_t c = tid; c < chunks; c += Threads) {
+                    if constexpr (Aligned) {
+                        tile[c] =
+                            *reinterpret_cast<const sycl::vec<float, VEC> *>(
+                                row_in + c * VEC);
+                    } else {
+                        sycl::vec<float, VEC> v(0.0f);
+                        const std::size_t remain = cols - c * VEC;
+                        for (std::size_t e = 0; e < VEC && e < remain; ++e) {
+                            v[e] = row_in[c * VEC + e];
+                        }
+                        tile[c] = v;
+                    }
+                }
+                it.barrier(sycl::access::fence_space::local_space);
+
+                float partial_max = -sycl::infinity_v<float>;
+                for (std::size_t c = tid; c < chunks; c += Threads) {
+                    for (std::size_t e = 0; e < VEC; ++e) {
+                        partial_max =
+                            sycl::max(partial_max, tile[c][e]);
+                    }
+                }
+                const float row_max = sycl::reduce_over_group(
+                    it.get_group(), partial_max, sycl::maximum<float>());
+
+                float partial_sum = 0.0f;
+                sycl::vec<float, VEC> sum_vec(0.0f);
+                for (std::size_t c = tid; c < chunks; c += Threads) {
+                    sum_vec += sycl::exp(tile[c] - row_max);
+                }
+                for (std::size_t e = 0; e < VEC; ++e) {
+                    partial_sum += sum_vec[e];
+                }
+                const float row_sum = sycl::reduce_over_group(
+                    it.get_group(), partial_sum, sycl::plus<float>());
+                const float inv_sum = 1.0f / row_sum;
+
+                for (std::size_t c = tid; c < chunks; c += Threads) {
+                    const sycl::vec<float, VEC> out =
+                        sycl::exp(tile[c] - row_max) * inv_sum;
+                    if constexpr (Aligned) {
+                        *reinterpret_cast<sycl::vec<float, VEC> *>(
+                            row_out + c * VEC) = out;
+                    } else {
+                        for (std::size_t e = 0; e < VEC; ++e) {
+                            row_out[c * VEC + e] = out[e];
+                        }
+                    }
+                }
+            });
+    });
+}
+
+void softmax_slm(sycl::queue &q, const float *x, float *y, int rows,
+                 int cols) {
+    const bool aligned = cols % VEC == 0;
+    const int threads = cols <= 256 ? 16 : (cols <= 1024 ? 32 : 128);
+    if (aligned && threads == 16) softmax_slm_impl<true, 16>(q, x, y, rows, cols);
+    else if (aligned && threads == 32) softmax_slm_impl<true, 32>(q, x, y, rows, cols);
+    else if (aligned) softmax_slm_impl<true, 128>(q, x, y, rows, cols);
+    else if (threads == 16) softmax_slm_impl<false, 16>(q, x, y, rows, cols);
+    else if (threads == 32) softmax_slm_impl<false, 32>(q, x, y, rows, cols);
+    else softmax_slm_impl<false, 128>(q, x, y, rows, cols);
+}
+```
+
+For odd column counts the unaligned branch must clamp the final chunk with
+`cols - c * VEC`; the aligned branch may use `vec<float,16>` only when input
+and output are 64 B aligned.
+
+## GEMV Fast Core
+
+Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\gemv_bench.cpp`.
+One row per sub-group with per-lane trip count derived from the actual
+sub-group size.
+
+```cpp
+void gemv_fast(sycl::queue &q, const float *a, const float *x, float *y,
+               std::size_t m, std::size_t n) {
+    const std::size_t nvec = n / 16;
+    q.submit([&](sycl::handler &h) {
+        h.parallel_for(
+            sycl::nd_range<2>(sycl::range<2>(16, m),
+                              sycl::range<2>(16, 32)),
+            [=](sycl::nd_item<2> it) {
+                auto sg = it.get_sub_group();
+                const std::size_t lane = sg.get_local_linear_id();
+                const std::size_t sg_id = sg.get_group_linear_id();
+                const std::size_t sg_size = sg.get_local_range()[0];
+                const std::size_t per_lane = nvec / sg_size;
+                const std::size_t row = it.get_group(1) * 32 + sg_id;
+
+                sycl::vec<float, 16> acc(0.0f);
+                for (std::size_t k = 0; k < per_lane; ++k) {
+                    const std::size_t col = (lane * per_lane + k) * 16;
+                    acc +=
+                        *reinterpret_cast<const sycl::vec<float, 16> *>(
+                            a + row * n + col) *
+                        *reinterpret_cast<const sycl::vec<float, 16> *>(
+                            x + col);
+                }
+
+                float partial = 0.0f;
+                for (std::size_t e = 0; e < 16; ++e) partial += acc[e];
+                const float total = sycl::reduce_over_group(
+                    sg, partial, sycl::plus<float>());
+                if (lane == 0) y[row] = total;
+            });
+    });
+}
+```
+
+Do not hardcode `per_lane = nvec / 16`; the A770 compiler may form 32-lane
+sub-groups and only half the row would be covered.
+
+## Sparse CSR/BSR Cores
+
+Extracted from `E:\RiderProjects\IrregularShapes-Opti\src\sparse_gemm_bench.cpp`.
+`N=8`, so each row accumulates into one `float8` output vector.
+
+```cpp
+void csr_gemm(sycl::queue &q, const int *ptr, const int *cols,
+              const float *vals, const float *b, float *c) {
+    q.parallel_for(sycl::range<1>(512), [=](sycl::id<1> row_id) {
+        const int row = static_cast<int>(row_id[0]);
+        sycl::vec<float, 8> acc(0.0f);
+        for (int p = ptr[row]; p < ptr[row + 1]; ++p) {
+            const float av = vals[p];
+            const int k = cols[p];
+            const sycl::vec<float, 8> *bv =
+                reinterpret_cast<const sycl::vec<float, 8> *>(
+                    b + static_cast<std::size_t>(k) * 8);
+            acc += av * (*bv);
+        }
+        *reinterpret_cast<sycl::vec<float, 8> *>(
+            c + static_cast<std::size_t>(row) * 8) = acc;
+    });
+}
+
+template <int B>
+void bsr_tile_gemm(sycl::queue &q, const int *ptr, const int *cols,
+                   const float *vals, const float *b, float *c) {
+    q.parallel_for(sycl::range<1>(512 / B), [=](sycl::id<1> block_id) {
+        const int rb = static_cast<int>(block_id[0]);
+        sycl::vec<float, 8> acc[B];
+        for (int r = 0; r < B; ++r) acc[r] = 0.0f;
+        for (int p = ptr[rb]; p < ptr[rb + 1]; ++p) {
+            const int cb = cols[p];
+            const float *block = vals + static_cast<std::size_t>(p) * B * B;
+            for (int r = 0; r < B; ++r) {
+                for (int c = 0; c < B; ++c) {
+                    const sycl::vec<float, 8> *bv =
+                        reinterpret_cast<const sycl::vec<float, 8> *>(
+                            b + static_cast<std::size_t>(cb * B + c) * 8);
+                    acc[r] += block[r * B + c] * (*bv);
+                }
+            }
+        }
+        for (int r = 0; r < B; ++r) {
+            *reinterpret_cast<sycl::vec<float, 8> *>(
+                c + static_cast<std::size_t>(rb * B + r) * 8) = acc[r];
+        }
+    });
+}
+```
+
+BSR `B=16` at `M=512` creates only 32 row-block work-items and is
+launch-bound; prefer `B=4` for this shape.
