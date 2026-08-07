@@ -18,6 +18,7 @@
 - f32 GEMV core (sub-group per row, direct L2)
 - f32 RMSNorm core (SLM row tile)
 - f32 Softmax core (SLM row tile)
+- Bandwidth read/copy/reduce cores
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -1011,3 +1012,85 @@ for (int i = 0; i < M; i++)
 ```
 
 Report `errors=0/<total>` and the per-run average, and repeat at least 3 times to confirm stability before accepting a change.
+
+## Bandwidth Read/Copy/Reduce Cores
+
+Extracted from `E:\RiderProjects\BandWidth-Opti\src\bandwidth.cpp`. These are
+the standard-SYCL cores used to measure the A770 bandwidth ceilings. The
+benchmark harness around them calibrates iteration count, records three runs,
+and keeps >5%-CV configs in `failures.csv`.
+
+```cpp
+template <int V, int Repeats>
+void run_read(sycl::queue &q, const float *src, float *out, size_t msgs,
+              size_t stride, size_t workers, size_t wg) {
+  q.parallel_for(sycl::nd_range<1>{sycl::range<1>{workers},
+                                   sycl::range<1>{wg}},
+                 [=](sycl::nd_item<1> it) {
+                   const size_t gid = it.get_global_linear_id();
+                   float sum = 0.0f;
+                   for (size_t m = gid; m < msgs; m += workers) {
+#pragma unroll
+                     for (int r = 0; r < Repeats; ++r) {
+                       sycl::vec<float, V> v;
+                       v.load(0, src + m * stride + r * V);
+#pragma unroll
+                       for (int k = 0; k < V; ++k) {
+                         sum += v[k];
+                       }
+                     }
+                   }
+                   out[gid] = sum;
+                 });
+}
+
+template <int V, int Repeats>
+void run_copy(sycl::queue &q, const float *src, float *dst, size_t msgs,
+              size_t stride, size_t workers, size_t wg) {
+  q.parallel_for(sycl::nd_range<1>{sycl::range<1>{workers},
+                                   sycl::range<1>{wg}},
+                 [=](sycl::nd_item<1> it) {
+                   const size_t gid = it.get_global_linear_id();
+                   for (size_t m = gid; m < msgs; m += workers) {
+#pragma unroll
+                     for (int r = 0; r < Repeats; ++r) {
+                       sycl::vec<float, V> v;
+                       v.load(0, src + m * stride + r * V);
+                       v.store(0, dst + m * stride + r * V);
+                     }
+                   }
+                 });
+}
+
+template <int V, int Repeats>
+void run_reduce(sycl::queue &q, const float *src, float *out, size_t msgs,
+                size_t stride, size_t workers, size_t wg) {
+  q.parallel_for(sycl::nd_range<1>{sycl::range<1>{workers},
+                                   sycl::range<1>{wg}},
+                 [=](sycl::nd_item<1> it) {
+                   const size_t gid = it.get_global_linear_id();
+                   float sum = 0.0f;
+                   for (size_t m = gid; m < msgs; m += workers) {
+#pragma unroll
+                     for (int r = 0; r < Repeats; ++r) {
+                       sycl::vec<float, V> v;
+                       v.load(0, src + m * stride + r * V);
+#pragma unroll
+                       for (int k = 0; k < V; ++k) {
+                         sum += v[k];
+                       }
+                     }
+                   }
+                   const float group_sum =
+                       sycl::reduce_over_group(it.get_group(), sum,
+                                               sycl::plus<float>());
+                   if (it.get_local_linear_id() == 0) {
+                     out[it.get_group_linear_id()] = group_sum;
+                   }
+                 });
+}
+```
+
+Use `(V, Repeats) = (8,1)`, `(16,1)`, `(16,2)`, `(16,4)` for 32/64/128/256 B
+messages, and allocate source/destination/out with
+`sycl::aligned_alloc_device<float>(64, n, q)`.
