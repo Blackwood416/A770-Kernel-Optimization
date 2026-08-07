@@ -23,6 +23,7 @@
 - Softmax fast/fallback cores
 - GEMV fast core
 - Sparse CSR/BSR cores
+- Precision tolerance helper
 - Correctness and timing harness
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each section names the compilable source file it was extracted from, so you can recover the full original implementation when this skill is used away from the campaign workspace. They are building blocks, not a drop-in operator: adapt the tile constants, address math, and host packing to your shape, and keep the tile-divisibility constraints from the linked variants.
@@ -1331,3 +1332,34 @@ void bsr_tile_gemm(sycl::queue &q, const int *ptr, const int *cols,
 
 BSR `B=16` at `M=512` creates only 32 row-block work-items and is
 launch-bound; prefer `B=4` for this shape.
+
+## Precision Tolerance Helper
+
+Extracted from the verification pattern in
+`E:\RiderProjects\Numerics-Opti\src\numerics.cpp`. The reference is computed
+in f64; the device result is checked with a combined relative/absolute
+tolerance, and the full histogram is kept for precision-switch decisions.
+
+```cpp
+bool close_enough(double got, double want, double rel_tol, double abs_tol) {
+  return std::abs(got - want) <=
+         rel_tol * std::max(std::abs(got), std::abs(want)) + abs_tol;
+}
+
+// Keep a histogram of log10(|got - want|) so a precision change can be
+// judged by distribution, not only by the first failing element.
+void record_error(double got, double want,
+                  std::array<size_t, 10> &histogram) {
+  const double err = std::abs(got - want);
+  if (err == 0.0) {
+    histogram[0]++;
+  } else {
+    const int bucket = std::clamp(
+        static_cast<int>(std::log10(err)) + 7, 0, 9);
+    histogram[bucket]++;
+  }
+}
+```
+
+Use `rel=0, abs=0` for int8 exact paths, and the tolerance table in
+[numerics.md](techniques/numerics.md) after restructure for f32/bf16/f16.

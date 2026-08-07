@@ -109,6 +109,9 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - The softmax vector fast path only wins from about 512 columns on A770; for short rows (<=256 cols) the scalar-chunk fallback can be faster because launch/wave overhead dominates.
 - Non-16-aligned GEMV is the largest irregular-shape gap: 1025 columns measured about 34.7x slower than the aligned fast path and 2011 about 41.1x. Add a padded/tail-vector fast path when such shapes are common.
 - BSR tile size must keep enough row-block work-items. At M=512, B16 leaves only 32 work-items and is launch-bound; B4 was the measured sweet spot for 50% sparsity.
+- bf16/f16 accumulation in a low-precision accumulator is not just slower precision, it changes error class: measured bf16/bf16 reduction error reached 8.74 and f16/bf16 reached 2.29 on 256x4096. Keep accumulators in f32 unless the application explicitly accepts O(1) relative error.
+- On tiny inputs, flush-to-zero clears f32/bf16 products that underflow to f32 subnormals. Use absolute tolerance or pre-scale data when such underflow is allowed.
+- fp8 is not usable on this stack: oneAPI 2026.1 has no SYCL fp8 type and Xe-HPG has no fp8 DPAS path.
 
 ## Diagnostic Traps
 
