@@ -12,10 +12,10 @@ driver `32.0.101.8724` on Windows; re-measure before transferring them to
 another GPU, driver, or compiler.
 
 Measured campaign results include: bf16 GEMM 1.95 ms to 0.0614 ms (about 87%
-of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to 0.215 ms, RMSNorm 5.382 ms to
-0.098 ms, Softmax 5.55 ms to 0.107 ms, plus bandwidth/roofline, execution
-model, compiler, irregular-shape, numerics, reduction/scan, robustness, and
-attention/conv campaigns.
+of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to 0.201 ms (ESIMD), RMSNorm
+5.382 ms to 0.098 ms, Softmax 5.55 ms to 0.107 ms, plus bandwidth/roofline,
+execution model, compiler, irregular-shape, numerics, reduction/scan,
+robustness, and attention/conv campaigns.
 
 ## How to Use This Skill
 
@@ -24,6 +24,7 @@ attention/conv campaigns.
    - Irregular shapes, gather/scatter, sparse GEMM: [irregular-shapes.md](references/techniques/irregular-shapes.md)
    - Full reduction, atomic contention, work-group scan: [reductions-scan.md](references/techniques/reductions-scan.md)
    - Flash attention, direct convolution: [attention-conv.md](references/techniques/attention-conv.md)
+   - Decode attention (Q=1, GQA/MQA, paged KV): [attention-decode.md](references/techniques/attention-decode.md)
    - Precision, accumulator, tolerance, math modes: [numerics.md](references/techniques/numerics.md)
 2. Decide whether the kernel is compute-bound or memory-bound with the
    bandwidth microbenchmark and roofline ridge: [bandwidth.md](references/hardware/bandwidth.md).
@@ -130,12 +131,23 @@ Full hardware details and measured bandwidth/stride tables:
   [techniques.md](references/techniques/techniques.md#the-full-ladder).
 - GEMV: `[MEASURED]` f32 4096x4096 standard-SYCL champion is
   sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
-  derived from the actual sub-group size; the ESIMD crossover is pending
-  measurement. See
+  derived from the actual sub-group size (0.215 ms). The ESIMD
+  one-work-item-per-row path with 256 B block loads measured faster on
+  `4096x4096` (0.201 ms), `1024x4096` (0.091 ms vs 0.127 ms), and `64x128`
+  (0.0039 ms vs 0.0075 ms). oneMKL still wins device time (0.166 ms at
+  `4096x4096`); oneDNN `Kx1` used `jit:gemm:any` at 0.456 ms event / 0.685 ms
+  verbose on the same shape. See
   [techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a).
+- Weight-only decode GEMV: `[MEASURED]` M=64, N=8192, K=8192, gs=128:
+  packed load -> unpack -> FMA 41.47 ms, device unpack -> VNNI SLM -> DPAS
+  5.65 ms, host predequant + DPAS 0.645 ms, oneDNN u4 `ba` + scales + zp8
+  `jit:gemm:any` 0.219 ms. M=1 DPAS is a negative path. See
+  [weight-only-gemv.md](references/weight-only-gemv.md).
 - Row reductions (RMSNorm/Softmax): `[MEASURED]` f32 1024x4096: stage the row
-  in SLM and normalize from SLM; shrink WG size for short rows. Low-row
-  decode shapes are pending measurement. See
+  in SLM and normalize from SLM; shrink WG size for short rows. For RMSNorm
+  rows 1-1024 x hidden 256-16384 in f32/f16/bf16, use the measured
+  shape-dispatch map instead of one champion. See
+  [rmsnorm-shape-sweep.md](references/rmsnorm-shape-sweep.md) and
   [techniques.md](references/techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32).
 - Irregular/sparse: `[HEURISTIC]` from `M=K=512, N=8, f32`: CSR for >=90%
   sparsity, BSR B4 for about 50%, scalar-chunk fallback for non-16-aligned
@@ -146,9 +158,13 @@ Full hardware details and measured bandwidth/stride tables:
   WG64 Hillis-Steele is a starting point. See
   [reductions-scan.md](references/techniques/reductions-scan.md).
 - Attention/conv: `[MEASURED]` small f32 prefill shape `B=4 H=16 Q=128
-  KV=256 D=64`: naive three-kernel attention wins; decode attention is
-  pending. NHWC conv wins only with OC cache blocking. See
-  [attention-conv.md](references/techniques/attention-conv.md).
+  KV=256 D=64`: naive three-kernel attention wins. `[MEASURED]` f32 Q=1
+  decode `B=4 Hq=8 Hkv=8/2/1 KV=512..32768 D=64/128`: naive wins only at
+  KV=512; `kv_cache_chunk_layout`/`online_causal_fused` take over at
+  KV>=2048, with paged KV close behind. NHWC conv wins only with OC cache
+  blocking. See
+  [attention-conv.md](references/techniques/attention-conv.md) and
+  [attention-decode.md](references/techniques/attention-decode.md).
 - Numerics: `[MEASURED]` small f32/bf16/f16/int8 shapes: keep f32 accumulators
   for bf16/f16 and use combined relative/absolute tolerances. See
   [numerics.md](references/techniques/numerics.md).
@@ -186,6 +202,12 @@ Full hardware details and measured bandwidth/stride tables:
   assembly.
 - Host preprocessing belongs outside the timed loop when inputs are static.
 - The second 8-column B slice of a joint-matrix GEMM is `+16 bf16`, not `+8`.
+- Packed u4 byte offset for K offset `bk` is `bk / 2`, not `bk * (BK/2)`;
+  the latter corrupts every K block after the first.
+- M=1 DPAS kernels must replicate row 0 into the 8 DPAS rows and guard output
+  stores; reading rows 1..7 of a one-row buffer can trigger device loss.
+- Decode attention should use a deterministic global two-phase reduce;
+  a single-kernel local-memory online combine produced `1952/2048` errors.
 - Verify library baselines against the CPU reference; oneDNN `1xK` is
   `x*A`, not `A*x`.
 - VTune `full-compute` ALU0/ALU1 numbers are single-run samples with high

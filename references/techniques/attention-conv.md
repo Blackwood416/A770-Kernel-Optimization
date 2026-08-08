@@ -26,7 +26,9 @@ because it has the most parallelism and S/P fit in L2. The flash-style
 variants prove the online/causal/KV-cache structures are correct and stable,
 and the earlier one-row-per-thread version was reduced from about 23 ms to
 about 2 ms. `[HEURISTIC]` for `seq <= 256` without an O(QKV) memory bound,
-prefer naive or the library baseline; decode attention needs its own sweep.
+prefer naive or the library baseline. Decode attention (`Q=1`,
+MHA/GQA/MQA, paged KV) has its own measured ladder:
+[attention-decode.md](attention-decode.md).
 
 ### Attention Negative Results
 

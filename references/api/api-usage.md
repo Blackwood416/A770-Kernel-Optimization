@@ -139,6 +139,12 @@ stream.wait();
 
 Compile with `/EHsc` when using the C++ API exceptions (`icx-cl /fsycl /EHsc ...`). Always verify the oneDNN output against the CPU RMSNorm reference; it measured `errors: 0/4194304` for 1024x4096 f32.
 
+For f16/bf16 src, the scale memory is still `f32`. Keep a separate `float*`
+scale array filled from the converted gamma values; passing the `T* gamma`
+array to the f32 scale descriptor corrupts every output (`max_abs_err ~2.68`
+at 64x256 f16/bf16). The measured oneDNN implementation on A770 for all swept
+RMSNorm shapes is `ocl:reusable:vectorized`, not a GEMM JIT path.
+
 ## oneDNN Softmax Baseline
 
 oneDNN 3.11.2 has a dedicated softmax primitive. For row-major f32 `{M, N}` and softmax along the last axis, use `softmax_forward` with `prop_kind::forward_inference`, `algorithm::softmax_accurate`, and `axis=1`. Create the engine and stream from the same SYCL GPU queue and pass shared USM pointers.

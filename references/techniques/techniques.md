@@ -110,8 +110,26 @@ Measured on Intel Arc A770 with the same USM harness (50 warmup + 500 timed laun
 | 2 | `vec<float,16>` row + x staged in SLM | 0.50 ms | Vectorization helps; SLM still has staging overhead |
 | 3 | One row per sub-group + x in SLM | 0.24 ms | 16 lanes cooperate on one row |
 | 4 | One row per sub-group + x direct from L2 | 0.215 ms | Best measured standard-SYCL variant |
+| 5 | ESIMD one work-item per row, 256 B `block_load<float,64>` | 0.201 ms | SIMD32, no cross-lane reduce; new champion |
 
-Library baselines for the same `y = A*x` operator: oneMKL GPU gemv 0.329 ms, oneDNN GPU matmul `Kx1` 0.380 ms. oneDNN matmul `1xK` measured 0.182 ms but computes `x*A`, which is `A^T*x` for the row-major input, and failed the reference check; always verify the library result before trusting a baseline.
+Library baselines for the same `y = A*x` operator with the unified protocol
+(10 warmup + 20 samples, SYCL event device median): oneMKL GPU gemv
+`transpose::trans` 0.166 ms, oneDNN GPU matmul `Kx1` `jit:gemm:any`
+0.456 ms event / 0.685 ms `ONEDNN_VERBOSE` exec median. The older 0.329 /
+0.380 ms numbers were wall-time based. oneDNN matmul `1xK` measured 0.182 ms
+but computes `x*A`, which is `A^T*x` for the row-major input, and failed the
+reference check; always verify the library result before trusting a baseline.
+
+Crossover across shapes (device median, ms):
+
+| Shape | standard-SYCL | ESIMD | oneMKL | oneDNN event |
+|---|---:|---:|---:|---:|
+| 4096x4096 | 0.215 | 0.201 | 0.166 | 0.456 |
+| 1024x4096 | 0.127 | 0.091 | 0.049 | 0.084 |
+| 64x128 | 0.0075 | 0.0039 | 0.0068 | 0.0069 |
+
+The `64x128` standard-SYCL row uses a `vec4` sub-group-per-row fallback; the
+`vec16` fallback is 0.0358 ms because only 8 of 32 lanes are useful.
 
 Copy-ready kernel and fallback rule: [f32 GEMV core](../api/code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
 
@@ -121,6 +139,8 @@ Copy-ready kernel and fallback rule: [f32 GEMV core](../api/code-snippets.md#f32
 - Staging x in SLM is not needed for this shape: x is 16 KB, L1/L2 hold it while A is streamed once, and the SLM copy adds a barrier and extra instructions.
 - Hardcoding 16 lanes is a correctness trap. A770 reports sub-group sizes 8/16/32 and the compiler picked 32 for the fastest kernels; a kernel written for 16 lanes then computed only half of each row (`max_err` about half the reference magnitude). Derive `per_lane = (N / VEC) / sgrp.get_local_range()[0]` instead. Forcing `sub_group_size<16>` was correct but slower (about 0.258 ms for the pointer-hoisted variant).
 - Pointer hoisting and explicit two-accumulator unrolling were slower (0.258 to 0.323 ms), so the compiler was already turning `a + row*N + col` into incrementing addresses. VTune showed the cost is FMA plus reduction, not address math.
+- ESIMD wins on device time at all three measured shapes despite about 9% more total instructions: SIMD32 at 100% utilization, 256 B block loads, and no cross-lane `reduce_over_group`. VTune per-kernel: ESIMD 4.215M instructions (Int32/SP 52.6%, Other 33.3%, Send 12.7%) vs standard-SYCL 3.875M (Int32/SP 61.0%, Other 18.8%, Send 13.7%). Achieved bandwidth for the ESIMD champion is about 334 GB/s.
+- oneMKL remains the device-time champion at all three shapes; its SYCL event at `4096x4096` implies about 405 GB/s, so treat that event time with the caveat that it may not cover the full implementation. At `64x128`, ESIMD has the lowest wall time of the four paths.
 
 ## u4->bf16 GEMV Ladder (4096x4096, bf16 A, u4 x, group_size=128)
 
