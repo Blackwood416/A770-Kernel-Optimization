@@ -35,6 +35,9 @@ robustness, and attention/conv campaigns.
 5. Before running new ESIMD shapes, isolate them with the robustness
    watchdog: [robustness.md](references/workflow/robustness.md).
 6. Verify every change with the workflow below, and record negative results.
+7. Reuse the measured harness for build, verify, benchmark, baseline, VTune,
+   watchdog, and record workflows:
+   [automation.md](references/workflow/automation.md).
 
 ## Evidence Levels
 
@@ -220,6 +223,8 @@ Complete evidence: [pitfalls.md](references/workflow/pitfalls.md).
 - API forms, build/profile commands, oneMKL/oneDNN baselines, graph/dual-queue
   submission, IR dump, and watchdog usage:
   [api-usage.md](references/api/api-usage.md).
+- Reusable benchmark/verify/record/watchdog CLI and record schema:
+  [automation.md](references/workflow/automation.md).
 - Copy-ready building blocks for every campaign:
   [code-snippets.md](references/api/code-snippets.md).
 

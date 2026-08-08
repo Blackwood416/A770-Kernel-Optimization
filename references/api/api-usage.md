@@ -16,6 +16,7 @@
 - Build and run commands
 - VTune commands
 - Verification methodology
+- Automation and experiment records
 
 Cross-reference: every API below is exercised by an embedded snippet in [code-snippets.md](code-snippets.md); measured context for when to use each one is in [techniques.md](../techniques/techniques.md) and [pitfalls.md](../workflow/pitfalls.md).
 
@@ -309,12 +310,33 @@ process and let a watchdog capture exit code, timeout, minidumps, and Windows
 Event Log:
 
 ```powershell
-python <watchdog-script> --suite probes --mode smoke --allow-risk --timeout 15
-python <watchdog-script> --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
+python scripts\watchdog.py --exe build\risk_probe.exe `
+    --iterations 1 --timeout 15 --label risk_probe --out artifacts\watchdog_risk
+python scripts\watchdog.py --exe build\risk_batch_esimd.exe `
+    --iterations 10 --timeout 30 --label risk_batch_esimd --out artifacts\watchdog_stress
 ```
 
 Details and the full safety checklist are in
 [robustness.md](../workflow/robustness.md).
+
+## Automation and Experiment Records
+
+The reusable harness provides environment probe, build, correctness compare,
+unified benchmark, oneDNN baseline probe, VTune parse, watchdog, and
+`record_experiment.py` with the unified JSON schema:
+
+```powershell
+python scripts\record_experiment.py --operator gemv --shape 4096x4096 `
+    --dtype f32 --variant sycl_subgroup_direct_l2 --exe build\f32_gemv.exe `
+    --probe-onednn --out artifacts\records\f32_gemv.json
+```
+
+Every record keeps `operator`, `shape`, `dtype`, `variant`, driver/oneAPI,
+`device_median_us`, `wall_median_us`, `pipeline_median_us`, `max_abs_err`,
+`errors`, `vtune`, baseline implementation, and status. It also writes a
+Markdown evidence file with the `[MEASURED]` validity domain. CLI contract and
+full examples:
+[automation.md](../workflow/automation.md).
 
 ## Verification Methodology
 

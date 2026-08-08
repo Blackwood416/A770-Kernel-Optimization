@@ -96,10 +96,14 @@ During/after:
 ## Commands
 
 ```powershell
-python <watchdog-script> --suite baseline --mode smoke --timeout 120
-python <watchdog-script> --suite probes --mode smoke --allow-risk --timeout 15
-python <watchdog-script> --target risk_batch_esimd --mode stress10 --allow-risk --timeout 30
+python scripts\watchdog.py --exe build\f32_gemv.exe `
+    --iterations 10 --timeout 120 --label f32_gemv --out artifacts\watchdog_baseline
+python scripts\watchdog.py --exe build\risk_probe.exe `
+    --iterations 1 --timeout 15 --label risk_probe --out artifacts\watchdog_risk
+python scripts\watchdog.py --exe build\risk_batch_esimd.exe `
+    --iterations 10 --timeout 30 --label risk_batch_esimd --out artifacts\watchdog_stress
 ```
 
 Artifacts: build status, per-run stdout/stderr/summary, minidump copies, and
-a machine-readable report.
+a machine-readable report. Full CLI details:
+[automation.md](automation.md).
