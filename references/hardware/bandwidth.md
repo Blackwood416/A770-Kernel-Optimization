@@ -22,13 +22,13 @@ transferring them to another GPU, driver, or compiler.
   footprint spans 64 MiB, above the 16 MiB L2, so it represents the DRAM-like
   regime.
 
-## Bandwidth Ceilings
+## Measured Bandwidth Patterns
 
 | Path | Configuration | Median GB/s | Stable |
 |---|---|---:|---|
-| DRAM-like global read | read, 256 B, stride 256 el | 277.0 | True |
-| DRAM-like global copy | copy, 256 B, stride 256 el | 328.8 | True |
-| DRAM-like global reduce | reduce, 256 B, stride 256 el | 273.4 | True |
+| Strided DRAM-like global read | read, 256 B, stride 256 el | 277.0 | True |
+| Strided DRAM-like global copy | copy, 256 B, stride 256 el | 328.8 | True |
+| Strided DRAM-like global reduce | reduce, 256 B, stride 256 el | 273.4 | True |
 | L2-resident global read | read, 256 B, stride 1 el | 854.6 | True |
 | L2-resident global copy | copy, 256 B, stride 1 el | 1300.9 | True |
 | SLM read | 256 B messages | 4115.8 | True |
@@ -37,6 +37,12 @@ transferring them to another GPU, driver, or compiler.
 Copy GB/s counts read plus write bytes (the benchmark doubles the source
 payload), so `328.8 GB/s` is already the aggregate bidirectional traffic; do
 not double it again.
+
+`277 GB/s` is a strided-pattern effective bandwidth (`B_DRAM_strided`), not a
+contiguous DRAM ceiling. A contiguous streaming benchmark
+(`B_DRAM_contiguous`) has not been measured yet and must not be assumed equal
+to this value. Use the pattern names `B_DRAM_contiguous`, `B_DRAM_strided`,
+`B_L2_reuse`, and `B_SLM` when choosing a roofline model.
 
 ## Message Width Cost (stride 256 el = 1024 B)
 
@@ -57,7 +63,11 @@ not double it again.
 
 ## Roofline Classification
 
-Ridge point: `26.2 TFLOPS / 277.0 GB/s = 94.7 FLOP/B`.
+This is an empirical campaign roofline, not a hardware/theoretical roofline.
+`26.2 TFLOPS` is the best measured bf16 GEMM throughput at `1024x1536x512`,
+and `277 GB/s` is the measured strided DRAM-like pattern.
+
+Empirical ridge point: `26.2 TFLOPS / 277.0 GB/s = 94.7 FLOP/B`.
 
 | Operation | FLOP/B | Achieved | Class |
 |---|---:|---|---|
@@ -69,9 +79,11 @@ Ridge point: `26.2 TFLOPS / 277.0 GB/s = 94.7 FLOP/B`.
 ## Rules
 
 1. Run a bandwidth microbenchmark before restructuring a kernel: if the
-   arithmetic intensity is far below the ridge and achieved bandwidth is near
-   the DRAM-like ceiling, stop chasing bandwidth and look at instruction
-   volume, redundant reads, and launch overhead.
+   arithmetic intensity is far below the empirical ridge and achieved
+   bandwidth is near the matching access-pattern baseline (`B_DRAM_strided`
+   for strided, `B_DRAM_contiguous` for fully coalesced once measured), stop
+   chasing bandwidth and look at instruction volume, redundant reads, and
+   launch overhead.
 2. Wider messages win: at the 1024 B stride, 256 B loads are about `2.7x`
    faster than 32 B loads for read and about `4.8x` faster for copy. Stage
    global-to-SLM traffic with 256 B messages.
@@ -100,5 +112,9 @@ them.
 Build and run the microbenchmark with the standard oneAPI Windows commands
 in [api-usage.md](../api/api-usage.md); the benchmark reports GB/s and keeps
 unstable configs in its own failure log.
+
+Contiguous DRAM read/copy/reduce, a validated compute peak, and the
+theoretical/validated roofline are pending benchmarks; do not treat the
+strided numbers as universal hardware ceilings.
 
 Copy-ready microbenchmark core: [bandwidth read/copy/reduce cores](../api/code-snippets.md#bandwidth-read-copy-reduce-cores).

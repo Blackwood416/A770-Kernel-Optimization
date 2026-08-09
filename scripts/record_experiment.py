@@ -23,7 +23,7 @@ from typing import Any
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from benchmark import benchmark_executable
-from compare_outputs import parse_stdout
+from compare_outputs import parse_stdout, validate_correctness_contract
 from harness_common import (
     ARTIFACTS_DIR,
     BUILD_DIR,
@@ -98,6 +98,7 @@ def main() -> int:
     parser.add_argument("--batch", type=int, default=100)
     parser.add_argument("--rel-tol", type=float, default=1e-4)
     parser.add_argument("--abs-tol", type=float, default=1e-4)
+    parser.add_argument("--semantics-id")
     parser.add_argument("--probe-onednn", action="store_true")
     parser.add_argument("--onednn-exe", type=pathlib.Path, default=BUILD_DIR / "f32_gemv_onednn.exe")
     parser.add_argument("--vtune-json", type=pathlib.Path)
@@ -114,10 +115,18 @@ def main() -> int:
         warmup=args.warmup,
         samples=args.samples,
         batch=args.batch,
+        rel_tol=args.rel_tol,
+        abs_tol=args.abs_tol,
     )
     compare = parse_stdout(stdout)
-    compare["rel_tol"] = args.rel_tol
-    compare["abs_tol"] = args.abs_tol
+    correctness_status, accuracy_class = validate_correctness_contract(
+        compare,
+        args.rel_tol,
+        args.abs_tol,
+        expected_semantics_id=args.semantics_id,
+    )
+    compare["correctness_status"] = correctness_status
+    compare["accuracy_class"] = accuracy_class
 
     baseline = None
     if args.probe_onednn:
@@ -127,6 +136,7 @@ def main() -> int:
             samples=args.samples,
             batch=args.batch,
             operator=args.operator,
+            semantics_id=args.semantics_id,
             rel_tol=args.rel_tol,
             abs_tol=args.abs_tol,
         )
@@ -138,6 +148,12 @@ def main() -> int:
     status = "PASS"
     if benchmark.get("status") != "OK":
         status = "BENCH_FAIL"
+    elif correctness_status in {
+        "CORRECTNESS_CONTRACT_MISSING",
+        "CORRECTNESS_CONTRACT_MISMATCH",
+        "SEMANTICS_MISMATCH",
+    }:
+        status = correctness_status
     elif compare.get("status") != "PASS":
         status = "VERIFY_FAIL"
 
@@ -152,10 +168,20 @@ def main() -> int:
         "wall_median_us": benchmark["wall_us"]["median"],
         "pipeline_median_us": benchmark["pipeline_us"]["median"],
         "max_abs_err": compare.get("max_abs_err"),
+        "max_rel_err": compare.get("max_rel_err"),
         "errors": compare.get("errors"),
         "total": compare.get("total"),
-        "accuracy_class": "matched" if status == "PASS" else "failed",
+        "accuracy_class": accuracy_class if status == "PASS" else (
+            "invalid" if compare.get("status") == "FAIL" else "unknown"
+        ),
         "reference_tolerance": f"rel={args.rel_tol:g}, abs={args.abs_tol:g}",
+        "requested_rel_tol": args.rel_tol,
+        "requested_abs_tol": args.abs_tol,
+        "reference": compare.get("reference"),
+        "semantics_id": compare.get("semantics_id"),
+        "accuracy_mode": compare.get("accuracy_mode"),
+        "relaxed_accuracy": compare.get("relaxed_accuracy"),
+        "correctness_status": correctness_status,
         "baseline_correctness_status": (
             baseline.get("baseline_correctness_status") if baseline else None
         ),

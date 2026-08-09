@@ -4,9 +4,10 @@
 > string (`jit:gemm:any`, `ocl:ref:any`, ...), format tags, dtypes, post-ops,
 > fpmath mode, dims, reorder/preprocessing, device time, wall time, and CPU
 > reference correctness. It must also record `accuracy_class` (`matched` /
-> `fastest` / `unknown`), `reference_tolerance`,
-> `baseline_correctness_status`, and `comparable_for_speedup`. See the oneDNN
-> Baseline Contract in SKILL.md.
+> `relaxed_matched` / `fastest_only` / `invalid` / `unknown`),
+> executable-reported `rel_tol` / `abs_tol`, `max_rel_err`, `reference`,
+> `semantics_id`, `accuracy_mode`, `baseline_correctness_status`, and
+> `comparable_for_speedup`. See the oneDNN Baseline Contract in SKILL.md.
 
 ## Table of Contents
 
@@ -348,9 +349,10 @@ python scripts\record_experiment.py --operator gemv --shape 4096x4096 `
 
 Every record keeps `operator`, `shape`, `dtype`, `variant`, driver/oneAPI,
 `device_median_us`, `wall_median_us`, `pipeline_median_us`, `max_abs_err`,
-`errors`, `vtune`, baseline implementation, and status. It also writes a
-Markdown evidence file with the `[MEASURED]` validity domain. CLI contract and
-full examples:
+`max_rel_err`, `errors`, `reference`, `semantics_id`, `correctness_status`,
+`vtune`, baseline implementation, and status. It also writes a Markdown
+evidence file with the `[MEASURED]` validity domain. CLI contract and full
+examples:
 [automation.md](../workflow/automation.md).
 
 ## Verification Methodology
@@ -363,5 +365,6 @@ full examples:
 6. Verify library baselines with the same CPU reference before trusting their timings; oneDNN `1xK` matmul is `x*A`, not row-major `A*x`.
 7. For steady-state GEMV timing, copy inputs into aligned USM once, warm up, then time the launch loop; a buffer-backed first launch can include host-to-device transfer.
 8. Record the oneDNN implementation string by setting `ONEDNN_VERBOSE=profile,dispatch` before the run; save `jit:gemm:any` vs `ocl:ref:any` with the result.
-9. Record `accuracy_class`, `reference_tolerance`, `baseline_correctness_status`, and `comparable_for_speedup`. A baseline that fails the required tolerance is a fastest-library lower bound, not a speedup competitor.
-10. Follow the unified Benchmark Protocol in SKILL.md: report median, p10/p90 or MAD, flag CV, and separate device time, wall time, and pipeline time.
+9. Record `accuracy_class`, `reference_tolerance`, `baseline_correctness_status`, and `comparable_for_speedup`. A baseline that fails the required tolerance is `fastest_only` only when operator semantics are confirmed and the failure comes from relaxed math; otherwise it is `invalid`, not a speedup competitor.
+10. Require the executable to report the tolerance it actually used. A mismatch with the requested tolerance is `CORRECTNESS_CONTRACT_MISMATCH`, and the record must not be emitted as `[MEASURED]`.
+11. Follow the unified Benchmark Protocol in SKILL.md: report median, p10/p90 or MAD, flag CV, and separate device time, wall time, and pipeline time.

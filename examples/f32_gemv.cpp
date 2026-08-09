@@ -30,10 +30,19 @@ size_t parse_size(const char* arg, const char* name, size_t fallback) {
   return static_cast<size_t>(std::strtoull(s.c_str() + std::strlen(name), nullptr, 10));
 }
 
+double parse_double(const char* arg, const char* name, double fallback) {
+  const std::string s(arg);
+  if (s.rfind(name, 0) != 0) return fallback;
+  return std::strtod(s.c_str() + std::strlen(name), nullptr);
+}
+
 int main(int argc, char** argv) {
   size_t warmup = 20;
   size_t samples = 20;
   size_t batch = 100;
+  double rel_tol = 1e-3;
+  double abs_tol = 1e-3;
+  std::string semantics_id = "gemv_n1_mkn_rowmajor";
   bool json = false;
   for (int i = 1; i < argc; ++i) {
     const std::string arg(argv[i]);
@@ -51,6 +60,16 @@ int main(int argc, char** argv) {
       batch = static_cast<size_t>(std::strtoull(argv[++i], nullptr, 10));
     } else if (arg.rfind("--batch=", 0) == 0) {
       batch = parse_size(argv[i] + 8, "", 100);
+    } else if (arg == "--rel-tol" && i + 1 < argc) {
+      rel_tol = std::strtod(argv[++i], nullptr);
+    } else if (arg.rfind("--rel-tol=", 0) == 0) {
+      rel_tol = parse_double(argv[i] + 10, "", rel_tol);
+    } else if (arg == "--abs-tol" && i + 1 < argc) {
+      abs_tol = std::strtod(argv[++i], nullptr);
+    } else if (arg.rfind("--abs-tol=", 0) == 0) {
+      abs_tol = parse_double(argv[i] + 10, "", abs_tol);
+    } else if (arg == "--semantics-id" && i + 1 < argc) {
+      semantics_id = argv[++i];
     }
   }
 
@@ -138,6 +157,7 @@ int main(int argc, char** argv) {
     q.wait();
 
     double max_abs = 0.0;
+    double max_rel = 0.0;
     size_t errors = 0;
     for (size_t row = 0; row < M; ++row) {
       double want = 0.0;
@@ -148,10 +168,21 @@ int main(int argc, char** argv) {
       const double got = y_host[row];
       const double diff = std::fabs(got - want);
       max_abs = std::max(max_abs, diff);
-      const double bound = 1e-3 * std::max(1.0, std::fabs(want)) + 1e-3;
+      const double rel = diff / std::max(std::fabs(got), std::fabs(want));
+      max_rel = std::max(max_rel, rel);
+      const double bound = rel_tol * std::max(std::fabs(got), std::fabs(want)) + abs_tol;
       if (!(diff <= bound)) ++errors;
     }
-    std::printf("errors: %zu/%zu max_abs: %.6g\n", errors, M, max_abs);
+    if (json) {
+      std::printf(
+          "{\"errors\":%zu,\"total\":%zu,\"max_abs_err\":%.6g,"
+          "\"max_rel_err\":%.6g,\"rel_tol\":%.6g,\"abs_tol\":%.6g,"
+          "\"reference\":\"cpu_f64\",\"semantics_id\":\"%s\","
+          "\"accuracy_mode\":\"default\",\"relaxed_accuracy\":false}\n",
+          errors, M, max_abs, max_rel, rel_tol, abs_tol, semantics_id.c_str());
+    } else {
+      std::printf("errors: %zu/%zu max_abs: %.6g\n", errors, M, max_abs);
+    }
 
     sycl::free(A, q);
     sycl::free(X, q);

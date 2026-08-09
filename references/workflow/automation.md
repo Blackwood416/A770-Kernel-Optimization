@@ -79,6 +79,32 @@ and print one JSON object per sample:
 The script reports median, p10/p90, MAD, CV percent, and a CV flag. Default
 flag threshold is CV > 10%.
 
+### Correctness contract
+
+Each benchmark executable must emit one JSON correctness object after its
+samples:
+
+```json
+{
+  "errors": 0,
+  "total": 262144,
+  "max_abs_err": 0.0012,
+  "max_rel_err": 0.0031,
+  "rel_tol": 0.05,
+  "abs_tol": 0.01,
+  "reference": "cpu_f16_precast",
+  "semantics_id": "matmul_mkn_rowmajor",
+  "accuracy_mode": "strict",
+  "relaxed_accuracy": false
+}
+```
+
+The requested `--rel-tol` / `--abs-tol` must equal the executable-reported
+values. A mismatch produces `CORRECTNESS_CONTRACT_MISMATCH`; a missing
+contract produces `CORRECTNESS_CONTRACT_MISSING`. Neither is emitted as
+`[MEASURED]`. `FAIL` is `invalid` unless `semantics_id` is present and
+`relaxed_accuracy=true`, in which case it is `fastest_only`.
+
 ### oneDNN baseline probe
 
 ```powershell
@@ -92,8 +118,12 @@ installed oneDNN build does not emit verbose lines, the script falls back to
 `primitive_desc.impl_info_str()` so the implementation string is still
 recorded. The artifact also records `accuracy_class`, `reference_tolerance`,
 `baseline_correctness_status`, and `comparable_for_speedup`; a baseline that
-fails the required tolerance is classified as `fastest` and must not be used
-for speedup ratios.
+fails the required tolerance is `fastest_only` only when operator semantics
+are confirmed and relaxed math is declared; otherwise it is `invalid`. Such a
+baseline must not be used for speedup ratios. The executable must report the
+tolerance it actually used; if it differs from the requested tolerance, the
+result is
+`CORRECTNESS_CONTRACT_MISMATCH` and no `[MEASURED]` record is emitted.
 
 ### VTune parse
 
@@ -142,10 +172,18 @@ Required JSON fields:
   "wall_median_us": 331.864,
   "pipeline_median_us": 331.864,
   "max_abs_err": 1.06112e-05,
+  "max_rel_err": 1.2e-04,
   "errors": 0,
   "total": 4096,
+  "reference": "cpu_f64",
+  "semantics_id": "gemv_n1_mkn_rowmajor",
+  "accuracy_mode": "default",
+  "relaxed_accuracy": false,
   "accuracy_class": "matched",
   "reference_tolerance": "rel=0.0001, abs=0.0001",
+  "requested_rel_tol": 0.0001,
+  "requested_abs_tol": 0.0001,
+  "correctness_status": "PASS",
   "baseline_correctness_status": "PASS",
   "comparable_for_speedup": true,
   "vtune": null,
@@ -183,6 +221,12 @@ Provenance: this is the automation harness smoke record
 run 2026-08-08). It is a separate campaign from the dense-operator GEMV
 ladder in `techniques.md`; retain the harness metadata when comparing values.
 
+On 2026-08-09 the same e2e path was re-run as a contract test on the current
+host (driver `32.0.101.8860`, Level Zero `1.15.38308`) with 2 samples to
+verify the correctness JSON and tolerance binding. That run was noisy (CV
+flagged) and is not a dispatch conclusion; historical campaign numbers keep
+their original `32.0.101.8724` provenance.
+
 ## Rules
 
 - Keep generated reports free of machine-specific absolute paths; command
@@ -190,6 +234,13 @@ ladder in `techniques.md`; retain the harness metadata when comparing values.
 - Before invoking any harness command, verify that the script exists. If it
   is unavailable, treat `automation.md` as an interface contract only and do
   not claim the script was executed.
+- The correctness contract is machine-readable: the executable reports
+  `rel_tol`, `abs_tol`, `reference`, and `semantics_id`. Requested tolerance
+  must equal executable-reported tolerance; `FAIL` is `invalid` unless
+  semantics are confirmed and relaxed accuracy is declared.
+- Before converting discrete benchmark points into an inequality dispatch,
+  sample points around every decision boundary; unswept values are
+  `[HEURISTIC]`.
 - Keep failed variants as standalone source files and record them as negative
   results; never delete a failing kernel merely because it failed.
 - Convert `record_experiment.py` output into skill documents with the

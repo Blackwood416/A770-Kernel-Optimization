@@ -3,14 +3,16 @@
 > `[MEASURED]` Intel Arc A770 (DG2), oneAPI 2026.1.0, Level-Zero
 > `1.15.37669`, driver `32.0.101.8724`, oneDNN `3.11.2`. Operator:
 > `C[M,N] = A[M,K] * B[K,N]`, row-major A/B, f32 or bf16 inputs, f32 C;
-> GEMV is the `N=1` specialization. Re-measure before transferring to another
+> GEMV-N1 is the `N=1` specialization `A[M,K] x[K] -> y[M]`. GEMV-M1
+> (`x[1,K] W[K,N] -> y[1,N]`, weight-only decode) is a separate operator
+> covered in `weight-only-gemv.md`. Re-measure before transferring to another
 > GPU, driver, compiler, or oneDNN build.
 
 ## Routes
 
 | Route | Supports |
 |---|---|
-| `gemv_sycl_f32` / `gemv_esimd_f32` | f32 GEMV, `N=1` |
+| `gemv_sycl_f32` / `gemv_esimd_f32` | f32 GEMV-N1, `N=1` |
 | `dpas_bf16` (DPAS8, padded rows + guard stores) | bf16, `N=1` or `N%8=0`, `K%32=0` |
 | `mkl_f32` | f32 GEMV/GEMM |
 | `onednn_f32` / `onednn_bf16` | f32 / bf16 GEMV/GEMM, `jit:gemm:any` |
@@ -27,9 +29,9 @@
 
 ## Headline Findings
 
-1. f32 GEMV device map: oneDNN wins `M<=64`; oneMKL wins `M>=256`; `M=128`
-   is a tie. Wall-time map differs: oneMKL has the lowest wall time at every
-   M on both swept K values.
+1. f32 GEMV-N1 device map: oneDNN wins `M<=64`; oneMKL wins `M>=256`;
+   `M=128` is a tie. Wall-time map differs: oneMKL has the lowest wall time
+   at every M on both swept K values.
 2. f32 GEMM: oneMKL and oneDNN are performance ties on every swept M/shape.
    Use oneDNN for f32 GEMM because the same `jit:gemm:any` path also covers
    bf16. oneMKL remains a reasonable wall-latency alternative.
@@ -64,7 +66,7 @@ Measured anchors:
 the 3% / p10-p90 overlap rule. Choose oneMKL only when wall latency is the
 measured deployment target and its wall advantage is reproduced.
 
-### f32 GEMV (`N=1`)
+### f32 GEMV-N1 (`N=1`)
 
 `[DISPATCH]` device-event rule:
 
@@ -76,13 +78,21 @@ Wall-time rule for deployment: `mkl_f32` at all M. oneDNN's tiny-M device win
 is offset by 70-200 us of host/wall overhead. Streaming SYCL and ESIMD GEMV
 routes are not dispatch champions anywhere in this sweep.
 
+### Discrete-to-Inequality Caveat
+
+The sweep measured M values `{1,2,4,8,16,32,64,128,256,512,1024}`. Rules that
+read as intervals (`M<=16`, `M<=64`, `M>=256`) are `[DISPATCH]` only on those
+exact rows and `[HEURISTIC]` for unswept integers such as 3, 7, 12, 48, or
+192. Before promoting an interval to a continuous dispatch, run a boundary
+interpolation sweep around each decision edge.
+
 ## Validity Domains
 
 - bf16: operator `gemm`/`gemv`; dtype `bf16`; M in swept subset; N/K in
   `{4096,8192,11008,14336}x{4096,14336}` plus `N=1`; row-major A/B; f32 C;
   A770 / oneAPI 2026.1.0 / driver `32.0.101.8724` / oneDNN 3.11.2.
 - f32 GEMM: dtype `f32`; M list `1..1024`; swept N/K pairs; same device.
-- f32 GEMV: `N=1`; K `{4096,14336}`; M list `1..1024`; same device.
+- f32 GEMV-N1: `N=1`; K `{4096,14336}`; M list `1..1024`; same device.
 
 Confidence: `[MEASURED]` on the exact swept rows, `[HEURISTIC]` outside them.
 
@@ -93,6 +103,7 @@ Confidence: `[MEASURED]` on the exact swept rows, `[HEURISTIC]` outside them.
 | Primitive | `dnnl::matmul` |
 | Implementation | `jit:gemm:any` for every swept shape/dtype |
 | Tags | src/weights `ab`, dst `ab` |
+| `semantics_id` | `gemm_mkn_rowmajor` / `gemv_n1_mkn_rowmajor` |
 | Post-ops | none |
 | `fpmath_mode` | default (no attribute set) |
 | Accuracy class | matched |
@@ -123,4 +134,7 @@ python sweep.py --samples 20 --warmup 5
 ```
 
 Full per-cell tables are maintained in the campaign's machine-readable
-results; this page keeps the condensed dispatch surface.
+results; this page keeps the condensed dispatch surface. Packaging the
+campaign sweep runner under `scripts/sweeps/gemm_crossover.py` is pending; the
+commands above currently run from the campaign checkout, not from this skill
+root.

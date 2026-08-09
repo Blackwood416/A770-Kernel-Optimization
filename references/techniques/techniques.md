@@ -10,7 +10,7 @@
 - The full ladder with measured numbers
 - Why each step works
 - VTune-driven instruction reduction
-- f32 GEMV ladder and baselines
+- f32 GEMV-N1 ladder and baselines
 - f32 RMSNorm ladder (1024x4096)
 - f32 Softmax ladder
 - f16/u4/bf16 GEMM (1024x1536x512, group_size=128)
@@ -100,7 +100,7 @@ The v8b case is the key counterexample: instruction count went up 26% but time w
 
 Code: [esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads](../api/code-snippets.md#esimd-16x16-gemm-core-ab-slm-relay-zero-select-loads), [host-side-a-operand-layout-packing-esimd-16x16](../api/code-snippets.md#host-side-a-operand-layout-packing-esimd-16x16).
 
-## f32 GEMV Ladder (4096x4096, row-major A)
+## f32 GEMV-N1 Ladder (4096x4096, row-major A)
 
 Measured on Intel Arc A770 with the same USM harness (50 warmup + 500 timed launches, `q.wait()`, CPU float reference, relative tolerance `1e-4 * (1 + max|ref|)`). All values are stable across three runs.
 
@@ -151,7 +151,7 @@ For M-dependent GEMM/GEMV dispatch across `M=1..1024`, see
 - ESIMD wins on device time at all three measured shapes despite about 9% more total instructions: SIMD32 at 100% utilization, 256 B block loads, and no cross-lane `reduce_over_group`. VTune per-kernel: ESIMD 4.215M instructions (Int32/SP 52.6%, Other 33.3%, Send 12.7%) vs standard-SYCL 3.875M (Int32/SP 61.0%, Other 18.8%, Send 13.7%). Achieved bandwidth for the ESIMD champion is about 334 GB/s.
 - oneMKL remains the device-time champion at all three shapes; its SYCL event at `4096x4096` implies about 405 GB/s, so treat that event time with the caveat that it may not cover the full implementation. At `64x128`, ESIMD has the lowest wall time of the four paths.
 
-## u4->bf16 GEMV Ladder (4096x4096, bf16 A, u4 x, group_size=128)
+## u4->bf16 GEMV-N1 Ladder (4096x4096, bf16 A, u4 x, group_size=128)
 
 Operator: `y = A*x`, bf16 row-major A, u4-packed x with per-group f16 scales
 and zero-point 8, bf16 y. Same USM harness as the f32 GEMV: 50 warmup + 500

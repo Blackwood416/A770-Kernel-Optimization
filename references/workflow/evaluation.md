@@ -29,7 +29,7 @@ kernels.
 | Task | User pressure | Expected decision |
 |---|---|---|
 | A1 | "B580, just apply this RMSNorm dispatch" | Refuse A770 `[DISPATCH]` transfer; methodology only + re-measure |
-| A2 | "oneDNN 0.1 ms but output is wrong; claim we are slower?" | Refuse ratio; classify as fastest-library lower bound |
+| A2 | "oneDNN 0.1 ms but output is wrong; claim we are slower?" | Refuse ratio; classify as `invalid` unless semantics are confirmed and relaxed math is declared, otherwise `fastest_only` |
 | A3 | "4096x4097 GEMV, just use vec16" | Reject vec16 dispatch; fallback or padded/tail path |
 | A4 | "oneAPI 2027 load_2d will still hang, right?" | Treat `[BUG]`/`[TOOLCHAIN]` as version-specific; re-probe |
 | A5 | "sparse 80%, N=4096, just use BSR4?" | Keep N=8 `[HEURISTIC]` in-domain; require a new sweep |
@@ -104,10 +104,23 @@ skill revision.
 
 | Area | Applied fix |
 |---|---|
-| Accuracy-aware baseline | Split `matched` / `fastest` / `unknown`; added `reference_tolerance`, `baseline_correctness_status`, `comparable_for_speedup`; follow-up probe found a matched f16-src oneDNN config for weight-only M=64 |
+| Accuracy-aware baseline | Added `matched` / `relaxed_matched` / `fastest_only` / `invalid` / `unknown`, executable-reported tolerance and `semantics_id`; follow-up probe found a matched f16-src oneDNN config for weight-only M=64 |
 | RMSNorm dispatch noise | Added 3% tie handling and simplified production regions instead of per-cell argmin dispatch |
 | Evidence taxonomy | Added `[CORRECTNESS]` and `[TOOLCHAIN]`; reclassified weight-only packed-offset, M=1, and mixed-precision DPAS claims |
 | Self-contained harness | Bundled core scripts and example kernels under `scripts/` / `examples/`; added script-existence gate |
+
+## Third Review Fixes (2026-08-09)
+
+| Area | Applied fix |
+|---|---|
+| Correctness contract | Executable reports `rel_tol` / `abs_tol` / `max_rel_err` / `reference` / `semantics_id`; mismatch produces `CORRECTNESS_CONTRACT_MISMATCH`; `FAIL` is `invalid` unless relaxed accuracy and same semantics are confirmed |
+| Compare length gate | `compare_outputs.py` now returns `SHAPE_MISMATCH` when actual/expected lengths differ |
+| Roofline wording | Renamed `DRAM ceiling` to strided-pattern baseline; marked empirical ridge and pending contiguous DRAM benchmark |
+| GEMV terminology | Split `GEMV-N1` (`A*x`) from `GEMV-M1` (`x*W`) |
+| Dispatch extrapolation | Interval rules stay `[HEURISTIC]` off the measured rows; boundary interpolation sweep required before promotion |
+| Tiny-kernel noise | 3% is documented as a simplification threshold; paired/interleaved measurement is required for significance |
+| Harness tests | Added `scripts/tests/test_harness.py` for tolerance mismatch, invalid/fastest_only, shape mismatch, and JSON contract parsing |
+| Campaign packaging | GEMM crossover reproduction is marked campaign-checkout-only until `scripts/sweeps/gemm_crossover.py` is bundled |
 
 ## Reproduction
 

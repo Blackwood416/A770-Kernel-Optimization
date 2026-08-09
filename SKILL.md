@@ -14,7 +14,7 @@ another GPU, driver, or compiler.
 Measured campaign results include: bf16 GEMM 1.95 ms to 0.0614 ms
 (1024x1536x512; about 87% of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to
 0.201 ms device median (4096x4096; see
-[techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a)),
+[techniques.md](references/techniques/techniques.md#f32-gemv-n1-ladder-4096x4096-row-major-a)),
 RMSNorm 5.382 ms to 0.098 ms (f32 1024x4096; see
 [rmsnorm-shape-sweep.md](references/rmsnorm-shape-sweep.md)), Softmax 5.55 ms
 to 0.107 ms (f32 1024x4096), plus bandwidth/roofline, execution model,
@@ -86,7 +86,10 @@ re-labeled `[HEURISTIC]`. After a toolchain upgrade, re-probe `[BUG]` and
    escalate to `full-compute`.
 4. Change exactly one structural variable per experiment and keep failed
    variants as standalone files.
-5. Verify every variant: exact reference compare, 3 stable values, and the
+5. Before promoting a discrete sweep into an inequality dispatch, sample
+   boundary points around each decision edge; unswept values stay
+   `[HEURISTIC]`.
+6. Verify every variant: exact reference compare, 3 stable values, and the
    VTune metrics that motivated the change.
 
 ## Benchmark Protocol
@@ -118,14 +121,19 @@ Every oneDNN baseline must record:
 - post-ops and `fpmath_mode`
 - runtime/static dims, reorder/preprocessing included
 - device time, wall time, and CPU-reference correctness
-- accuracy class (`matched` / `fastest` / `unknown`), reference tolerance,
-  baseline correctness status, and `comparable_for_speedup`
+- accuracy class (`matched` / `relaxed_matched` / `fastest_only` / `invalid` /
+  `unknown`), executable-reported `rel_tol` / `abs_tol`, `max_rel_err`,
+  `reference`, `semantics_id`, `accuracy_mode`, and `comparable_for_speedup`
 
 Enable `ONEDNN_VERBOSE=profile,dispatch` and keep the implementation string;
 it distinguishes "won against a JIT kernel" from "oneDNN fell back to a
 reference path". Do not compute speedup ratios against a baseline that fails
 the required tolerance; classify it as a fastest-library performance
-lower-bound only.
+lower-bound only when operator semantics are confirmed and the failure comes
+from a deliberately relaxed math mode. A FAIL without confirmed semantics is
+`invalid`, not `fastest_only`. The executable must report the tolerance it
+actually used; if it differs from the requested tolerance, the record is
+`CORRECTNESS_CONTRACT_MISMATCH` and must not be emitted as `[MEASURED]`.
 
 ## Hardware Quick Facts
 
@@ -137,7 +145,7 @@ lower-bound only.
 | Cache | L1 192 KB per Xe-core; L2 16 MB |
 | XMX bf16 DPAS | 8x8x16 on DG2; B must be VNNI-packed |
 | `block_load` | 256 B max on DG2 (512 B is PVC-only) |
-| DRAM-like read | 277 GB/s measured |
+| Strided DRAM-like read | 277 GB/s measured; contiguous ceiling pending |
 | L2-resident read | 855 GB/s measured |
 | SLM read | 4.1 TB/s measured |
 
@@ -158,7 +166,8 @@ Full hardware details and measured bandwidth/stride tables:
   is a oneMKL/oneDNN tie; f32 GEMV on device events uses oneDNN for `M<=64`
   and oneMKL for `M>=256`, while wall time favors oneMKL at every M. See
   [gemm-shape-crossover.md](references/techniques/gemm-shape-crossover.md).
-- GEMV: `[MEASURED]` f32 4096x4096 standard-SYCL champion is
+- GEMV-N1 (`A[M,K] x[K] -> y[M]`): `[MEASURED]` f32 4096x4096
+  standard-SYCL champion is
   sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
   derived from the actual sub-group size (0.215 ms device median). The ESIMD
   one-work-item-per-row path with 256 B block loads measured faster on
@@ -168,8 +177,9 @@ Full hardware details and measured bandwidth/stride tables:
   champion (at `64x128`, ESIMD also has the lowest wall time). oneMKL still
   wins device time (0.166 ms at `4096x4096`); oneDNN `Kx1` used
   `jit:gemm:any` at 0.456 ms event / 0.685 ms verbose on the same shape. See
-  [techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a).
-- Weight-only decode GEMV: `[MEASURED]` M=64, N=8192, K=8192, gs=128:
+  [techniques.md](references/techniques/techniques.md#f32-gemv-n1-ladder-4096x4096-row-major-a).
+- GEMV-M1 (`x[1,K] W[K,N] -> y[1,N]`, weight-only decode):
+  `[MEASURED]` M=64, N=8192, K=8192, gs=128:
   packed load -> unpack -> FMA 41.47 ms, device unpack -> VNNI SLM -> DPAS
   5.65 ms, host predequant + DPAS 0.656 ms, accuracy-matched oneDNN (f16 src,
   strict/any, f32 dst, `jit:gemm:any`) 0.209 ms at gs=128. Device ratio

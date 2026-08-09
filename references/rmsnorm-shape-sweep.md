@@ -401,6 +401,12 @@ dispatch branches, lower SLM, lower register pressure, lower CV, and better
 coverage of odd shapes. Only descend to the exact table when a tested variant
 has a margin above 3%.
 
+The 3% threshold is a dispatch simplification threshold, not a statistical
+significance threshold. Many cells have CV > 10%, so a claim that one variant
+is faster than another remains unproven until a paired/interleaved benchmark
+measures per-pair deltas (A/B/B/A or randomized order) instead of independent
+absolute timing runs.
+
 ## Dispatch Rule
 
 `[DISPATCH]` operator=RMSNorm forward with per-row `gamma`; dtype=f32/f16/bf16;

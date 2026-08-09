@@ -63,6 +63,8 @@ def benchmark_executable(
     warmup: int = 20,
     samples: int = 20,
     batch: int = 100,
+    rel_tol: float = 1e-4,
+    abs_tol: float = 1e-4,
     timeout: float = 600,
     legacy: bool = False,
 ) -> tuple[dict[str, Any], str]:
@@ -73,7 +75,8 @@ def benchmark_executable(
         else:
             exe = BUILD_DIR / exe
     command = (
-        f'"{exe}" --warmup {warmup} --samples {samples} --batch {batch} --json'
+        f'"{exe}" --warmup {warmup} --samples {samples} --batch {batch} '
+        f"--rel-tol {rel_tol:g} --abs-tol {abs_tol:g} --json"
     )
     cp = run_in_oneapi(command, cwd=BUILD_DIR, timeout=timeout)
     stdout = (cp.stdout or "") + (cp.stderr or "")
@@ -105,6 +108,8 @@ def main() -> int:
     parser.add_argument("--warmup", type=int, default=20)
     parser.add_argument("--samples", type=int, default=20)
     parser.add_argument("--batch", type=int, default=100)
+    parser.add_argument("--rel-tol", type=float, default=1e-4)
+    parser.add_argument("--abs-tol", type=float, default=1e-4)
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--legacy", action="store_true", help="parse 'run[N]: X ms avg'")
     parser.add_argument("--out", type=pathlib.Path, default=ARTIFACTS_DIR / "benchmark.json")
@@ -115,6 +120,8 @@ def main() -> int:
         warmup=args.warmup,
         samples=args.samples,
         batch=args.batch,
+        rel_tol=args.rel_tol,
+        abs_tol=args.abs_tol,
         timeout=args.timeout,
         legacy=args.legacy,
     )

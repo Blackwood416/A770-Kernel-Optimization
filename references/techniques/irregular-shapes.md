@@ -36,7 +36,7 @@ Rules:
 4. Rows above 8192 cols: read max directly from global and stage only sum +
    normalize tiles in SLM.
 
-## GEMV Shape Cost
+## GEMV-N1 Shape Cost
 
 Default `M=64`; dynamic case `M=96, N=1536`. `fast` is sub-group-per-row with
 `vec<float,16>` and per-lane trip counts from the actual sub-group size.
@@ -58,8 +58,8 @@ this campaign and must not be mixed with SYCL-event tables.
 
 Rules:
 
-1. `[HEURISTIC]` fast path requires `M % 32 == 0 && N % 16 == 0`; never
-   hardcode a 16-lane per-lane trip count because A770 may compile with
+1. `[HEURISTIC]` GEMV-N1 fast path requires `M % 32 == 0 && N % 16 == 0`;
+   never hardcode a 16-lane per-lane trip count because A770 may compile with
    32-lane sub-groups.
 2. `[MEASURED]` f32 M=64 on A770: N=1025 is about `34.7x` slower than N=1024
    and N=2011 is about `41.1x` slower than N=2048. Re-measure for other M/N

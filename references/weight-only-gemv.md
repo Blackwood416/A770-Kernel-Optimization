@@ -1,8 +1,9 @@
-# Weight-Only Decode GEMV: INT4 / NF4 on Arc A770
+# Weight-Only Decode GEMV-M1: INT4 / NF4 on Arc A770
 
-Operator: `y = x * W`, where `x` is bf16/f16 `[M,K]` with M in `{1,64}`, `W`
-is INT4/NF4 `[K,N]`, and `y` is f32/bf16. Packed layout is `[N,K/2]`, low
-nibble first along K; scales are f16 `[G,N]`; INT4 uses zero point 8.
+GEMV-M1 operator: `y = x * W`, where `x` is bf16/f16 `[M,K]` with M in
+`{1,64}`, `W` is INT4/NF4 `[K,N]`, and `y` is f32/bf16. This is distinct from
+GEMV-N1 (`A*x`, see `gemm-shape-crossover.md`). Packed layout is `[N,K/2]`,
+low nibble first along K; scales are f16 `[G,N]`; INT4 uses zero point 8.
 
 Evidence scope: `[MEASURED]` on Intel Arc A770 / oneAPI 2026.1 / driver
 `32.0.101.8724`, N/K in `{4096,8192}`, group size in `{32,64,128,256}`.
@@ -45,6 +46,7 @@ M=1 crossover: `[MEASURED]` R2 is a negative path (`4.47 ms` at
 - scalar u8 zero point `{1}` = 8
 - `fpmath_mode::strict` with `apply_to_int=true` (`any` also passes)
 - implementation `jit:gemm:any`
+- `semantics_id = gemv_m1_mkn_rowmajor`
 - `accuracy_class=matched`, `comparable_for_speedup=true`
 
 `[MEASURED]` 16 f16-src configurations (strict/any x f16/f32 scales x
@@ -66,7 +68,9 @@ Representative matched timings (device median):
 the required tolerance on all 16 shapes. Representative
 `64x4096x4096, gs=128, bf16->bf16`: `6072/262144` errors, max abs `3.873`;
 `bf16->f32`: `6066/262144` errors, max abs `2.099`. Classify bf16-src oneDNN
-as a fastest-library lower bound, not an accuracy-matched baseline.
+as `fastest_only` when the executable confirms the same `semantics_id` and a
+relaxed accuracy mode; without that confirmation it is `invalid`, not a
+lower bound.
 
 ### Toolchain Gate
 

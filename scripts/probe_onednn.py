@@ -24,7 +24,7 @@ from typing import Any
 sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent))
 
 from benchmark import parse_sample_json
-from compare_outputs import parse_stdout
+from compare_outputs import parse_stdout, validate_correctness_contract
 from harness_common import (
     ARTIFACTS_DIR,
     BUILD_DIR,
@@ -70,6 +70,7 @@ def probe_onednn(
     timeout: float = 600,
     operator: str = "gemv",
     primitive: str = "matmul",
+    semantics_id: str | None = None,
     rel_tol: float = 1e-4,
     abs_tol: float = 1e-4,
 ) -> dict[str, Any]:
@@ -82,19 +83,22 @@ def probe_onednn(
     env = os.environ.copy()
     env["ONEDNN_VERBOSE"] = "profile,dispatch"
     env["DNNL_VERBOSE"] = "profile,dispatch"
-    command = f'"{exe}" --warmup {warmup} --samples {samples} --batch {batch} --json'
+    command = (
+        f'"{exe}" --warmup {warmup} --samples {samples} --batch {batch} '
+        f"--rel-tol {rel_tol:g} --abs-tol {abs_tol:g} --json"
+    )
     cp = run_in_oneapi(command, cwd=BUILD_DIR, env=env, timeout=timeout)
     combined = (cp.stdout or "") + (cp.stderr or "")
     implementation, verbose_lines, from_verbose = parse_implementation(combined)
     samples_data = parse_sample_json(cp.stdout or "")
     compare = parse_stdout(combined)
-    baseline_ok = compare.get("status") == "PASS"
-    if compare.get("status") == "NO_VERIFY":
-        accuracy_class = "unknown"
-    elif baseline_ok:
-        accuracy_class = "matched"
-    else:
-        accuracy_class = "fastest"
+    correctness_status, accuracy_class = validate_correctness_contract(
+        compare,
+        rel_tol,
+        abs_tol,
+        expected_semantics_id=semantics_id,
+    )
+    comparable = accuracy_class in {"matched", "relaxed_matched"}
     device = [float(s["device_us"]) for s in samples_data]
     wall = [float(s["wall_us"]) for s in samples_data]
     pipeline = [float(s["pipeline_us"]) for s in samples_data]
@@ -103,6 +107,12 @@ def probe_onednn(
         status = "NO_SAMPLES"
     elif not implementation:
         status = "NO_IMPL"
+    elif correctness_status in {
+        "CORRECTNESS_CONTRACT_MISSING",
+        "CORRECTNESS_CONTRACT_MISMATCH",
+        "SEMANTICS_MISMATCH",
+    }:
+        status = correctness_status
     elif compare.get("status") != "PASS":
         status = "VERIFY_FAIL"
     return {
@@ -117,12 +127,19 @@ def probe_onednn(
         "pipeline_us": stats(pipeline),
         "sample_values": samples_data,
         "max_abs_err": compare.get("max_abs_err"),
+        "max_rel_err": compare.get("max_rel_err"),
         "errors": compare.get("errors"),
         "total": compare.get("total"),
+        "reference": compare.get("reference"),
+        "semantics_id": compare.get("semantics_id"),
+        "accuracy_mode": compare.get("accuracy_mode"),
+        "relaxed_accuracy": compare.get("relaxed_accuracy"),
         "accuracy_class": accuracy_class,
         "reference_tolerance": f"rel={rel_tol:g}, abs={abs_tol:g}",
-        "baseline_correctness_status": compare.get("status"),
-        "comparable_for_speedup": baseline_ok,
+        "requested_rel_tol": rel_tol,
+        "requested_abs_tol": abs_tol,
+        "baseline_correctness_status": correctness_status,
+        "comparable_for_speedup": comparable,
         "returncode": cp.returncode,
         "status": status,
     }
@@ -137,6 +154,7 @@ def main() -> int:
     parser.add_argument("--timeout", type=float, default=600)
     parser.add_argument("--operator", default="gemv")
     parser.add_argument("--primitive", default="matmul")
+    parser.add_argument("--semantics-id")
     parser.add_argument("--rel-tol", type=float, default=1e-4)
     parser.add_argument("--abs-tol", type=float, default=1e-4)
     parser.add_argument("--out", type=pathlib.Path, default=ARTIFACTS_DIR / "onednn.json")
@@ -150,6 +168,7 @@ def main() -> int:
         timeout=args.timeout,
         operator=args.operator,
         primitive=args.primitive,
+        semantics_id=args.semantics_id,
         rel_tol=args.rel_tol,
         abs_tol=args.abs_tol,
     )

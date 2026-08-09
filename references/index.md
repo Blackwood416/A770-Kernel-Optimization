@@ -12,11 +12,11 @@ measured tables, rules, and negative results.
 
 | Topic | Reference | Measured campaign |
 |---|---|---|
-| Hardware specs and measured ceilings | [hardware/hardware.md](hardware/hardware.md), [hardware/bandwidth.md](hardware/bandwidth.md) | GEMM and bandwidth campaigns |
+| Hardware specs and measured bandwidth patterns | [hardware/hardware.md](hardware/hardware.md), [hardware/bandwidth.md](hardware/bandwidth.md) | GEMM and bandwidth campaigns |
 | Dense operator ladders (GEMM/GEMV/RMSNorm/Softmax) | [techniques/techniques.md](techniques/techniques.md) | Dense operator campaigns |
 | GEMM/GEMV shape crossover (M 1-1024, N/K 4096-14336, f32/bf16) | [techniques/gemm-shape-crossover.md](techniques/gemm-shape-crossover.md) | GEMM-shape crossover campaign |
 | RMSNorm shape-dispatch sweep (rows 1-1024, hidden 256-16384, f32/f16/bf16) | [rmsnorm-shape-sweep.md](rmsnorm-shape-sweep.md) | RMSNorm shape sweep |
-| Weight-only INT4/NF4 decode GEMV (M=1/64, N/K=4096/8192, gs=32-256) | [weight-only-gemv.md](weight-only-gemv.md) | Weight-only GEMV campaign |
+| Weight-only INT4/NF4 decode GEMV-M1 (M=1/64, N/K=4096/8192, gs=32-256) | [weight-only-gemv.md](weight-only-gemv.md) | Weight-only GEMV campaign |
 | Irregular shapes and sparse GEMM | [techniques/irregular-shapes.md](techniques/irregular-shapes.md) | Irregular-shapes campaign |
 | Numerical precision and tolerance | [techniques/numerics.md](techniques/numerics.md) | Numerics campaign |
 | Reduction and scan selection | [techniques/reductions-scan.md](techniques/reductions-scan.md) | Reduction-scan campaign |
