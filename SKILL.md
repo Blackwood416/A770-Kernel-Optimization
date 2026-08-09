@@ -9,7 +9,8 @@ Optimize SYCL/ESIMD kernels on Intel Arc A770 (Xe-HPG/DG2) with measured
 hardware facts, proven technique ladders, known pitfalls, and API usage rules.
 All numbers are measured on Intel Arc A770 (DG2) with oneAPI 2026.1 and
 driver `32.0.101.8724` on Windows; re-measure before transferring them to
-another GPU, driver, or compiler.
+another GPU, driver, or compiler. This skill is a workflow and guidance layer,
+not a full optimizer.
 
 Measured campaign results include: bf16 GEMM 1.95 ms to 0.0614 ms
 (1024x1536x512; about 87% of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to
@@ -43,11 +44,13 @@ attention/conv campaigns.
 5. Before running new ESIMD shapes, isolate them with the robustness
    watchdog: [robustness.md](references/workflow/robustness.md).
 6. Verify every change with the workflow below, and record negative results.
-7. Reuse the measured harness for build, verify, benchmark, baseline, VTune,
-   watchdog, and record workflows. The core scripts are bundled under
-   `scripts/`; if a deployment lacks them, verify script existence before
-   claiming execution and treat `automation.md` as an interface contract:
+7. Optionally use the thin benchmark/correctness helpers under `scripts/`;
+   they are not a mandatory pipeline. If a deployment lacks them, verify
+   script existence before claiming execution:
    [automation.md](references/workflow/automation.md).
+8. For new-operator thinking, profiling-driven next experiments, and updating
+   the performance model from failures, read
+   [methodology.md](references/workflow/methodology.md).
 
 ## Evidence Levels
 
@@ -93,6 +96,10 @@ re-labeled `[HEURISTIC]`. After a toolchain upgrade, re-probe `[BUG]` and
    `[HEURISTIC]`.
 6. Verify every variant: exact reference compare, 3 stable values, and the
    VTune metrics that motivated the change.
+
+Keep the workflow light: the goal is evidence discipline, not an elaborate
+per-experiment schema. Use the helpers when they save time; skip the machinery
+when a simple script or manual record is clearer.
 
 ## Benchmark Protocol
 
@@ -287,7 +294,7 @@ Complete evidence: [pitfalls.md](references/workflow/pitfalls.md).
 - API forms, build/profile commands, oneMKL/oneDNN baselines, graph/dual-queue
   submission, IR dump, and watchdog usage:
   [api-usage.md](references/api/api-usage.md).
-- Reusable benchmark/verify/record/watchdog CLI and record schema:
+- Thin optional benchmark/verify/correctness helpers and record schema:
   [automation.md](references/workflow/automation.md).
 - Copy-ready building blocks for every campaign:
   [code-snippets.md](references/api/code-snippets.md).

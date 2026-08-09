@@ -86,7 +86,9 @@ routes are not dispatch champions anywhere in this sweep.
 The original sweep measured `{1,2,4,8,16,32,64,128,256,512,1024}`. A paired
 boundary interpolation sweep upgraded the two decision edges to continuous
 intervals and left only the two gaps above as `[HEURISTIC]`:
-[gemm-crossover-boundary.md](gemm-crossover-boundary.md).
+[gemm-crossover-boundary.md](gemm-crossover-boundary.md). Other measured
+points remain case studies; do not formalize every discrete shape into its
+own dispatch branch.
 
 ## Validity Domains
 

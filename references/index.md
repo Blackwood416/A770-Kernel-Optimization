@@ -26,9 +26,10 @@ measured tables, rules, and negative results.
 | Attention and convolution | [techniques/attention-conv.md](techniques/attention-conv.md) | Attention-conv campaign |
 | Decode attention Q=1, GQA/MQA, paged KV (KV 512-32768, D 64/128) | [techniques/attention-decode.md](techniques/attention-decode.md) | Decode attention campaign |
 | Launch, fusion, graph, host overhead | [workflow/execution.md](workflow/execution.md) | Execution-model campaign |
+| New-operator thinking, profiling next steps, failure-model updates | [workflow/methodology.md](workflow/methodology.md) | All campaigns |
 | Compiler behavior and codegen | [workflow/codegen.md](workflow/codegen.md) | Codegen campaign |
 | Robustness, watchdog, TDR protocol | [workflow/robustness.md](workflow/robustness.md) | Robustness campaign |
-| Bundled benchmark/verify/record harness | [workflow/automation.md](workflow/automation.md) | Automation harness campaign |
+| Thin optional benchmark/verify/correctness helpers | [workflow/automation.md](workflow/automation.md) | Automation harness campaign |
 | Skill behavior evaluation and text audit | [workflow/evaluation.md](workflow/evaluation.md) | SkillEval campaign |
 | Pitfalls and negative results | [workflow/pitfalls.md](workflow/pitfalls.md) | All campaigns |
 | API usage forms | [api/api-usage.md](api/api-usage.md) | All campaigns |

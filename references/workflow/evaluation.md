@@ -58,25 +58,34 @@ Every subject kept `[MEASURED]` claims in-domain or re-labeled them, marked
 implementation strings where a baseline exists, reported all three time
 fields, preserved negative results, and emitted path-free Markdown.
 
-## Adversarial and No-Skill Results (2026-08-09)
+## Adversarial and No-Skill Results (2026-08-10)
 
 `[MEASURED]` with-skill agents passed 6/6 adversarial tasks (mean weighted
-0.991); no-skill agents passed 0/6 (mean weighted 0.618), delta +0.373.
+0.993); no-skill agents passed 2/6 (mean weighted 0.733), delta +0.260.
 
 | Task | skill | no-skill | delta |
 |---|---:|---:|---:|
-| A1 B580 RMSNorm | 1.00 | 0.74 | +0.26 |
-| A2 wrong-output baseline | 1.00 | 0.62 | +0.38 |
-| A3 GEMV 4097 | 1.00 | 0.57 | +0.43 |
-| A4 oneAPI 2027 load_2d | 0.94 | 0.64 | +0.31 |
-| A5 sparse 80% N=4096 | 1.00 | 0.51 | +0.49 |
-| A6 fastest RMSNorm | 1.00 | 0.62 | +0.38 |
+| A1 B580 RMSNorm | 1.00 | 0.80 | +0.20 |
+| A2 wrong-output baseline | 1.00 | 1.00 | +0.00 |
+| A3 GEMV 4097 | 1.00 | 0.59 | +0.41 |
+| A4 oneAPI 2027 load_2d | 0.96 | 0.73 | +0.23 |
+| A5 sparse 80% N=4096 | 1.00 | 0.55 | +0.45 |
+| A6 fastest RMSNorm | 1.00 | 0.72 | +0.28 |
+
+Decision vs protocol split:
+
+| Run | decision | protocol | weighted |
+|---|---:|---:|---:|
+| adversarial with-skill | 1.000 | 0.988 | 0.993 |
+| adversarial no-skill | 0.933 | 0.589 | 0.733 |
 
 Both groups answered the adversarial decisions correctly from general
-knowledge. The skill's measured value is the formal compliance apparatus:
-`[MEASURED]`/`[HEURISTIC]` labeling, oneDNN verbose + accuracy class,
-device/wall fields, and benchmark protocol. No-skill reports commonly omitted
-evidence labels, oneDNN implementation strings, and separate timing fields.
+knowledge (decision means are close). The skill's measured value is protocol
+and evidence discipline: `[MEASURED]`/`[HEURISTIC]` labeling, validity
+domains, oneDNN verbose + accuracy class, device/wall fields, and benchmark
+protocol. No-skill reports dropped protocol scores sharply. Task A2's
+no-skill subject passed because the prompt itself spelled out the correctness
+JSON contract; general knowledge is enough when the contract is explicit.
 
 ## Audit and Applied Fixes
 
@@ -122,6 +131,8 @@ skill revision.
 | Harness tests | Added `scripts/tests/test_harness.py` for tolerance mismatch, invalid/fastest_only, shape mismatch, and JSON contract parsing |
 | Boundary dispatch | Boundary interpolation upgraded bf16 `M<=16` / `M>=24` and f32 GEMV-N1 `M<=64` / `M>=192`; unswept gaps stay `[HEURISTIC]` |
 | Campaign packaging | Intentionally not bundled: the skill is a workflow/guidance layer, not a full optimizer |
+| SkillEval scoring | Split `decision_total` / `protocol_total` / `weighted_total`; decision means are close, protocol means carry the skill delta |
+| Workflow scope | Added `methodology.md` for new-operator thinking, profiling-driven next experiments, and failure-model updates; harness marked optional thin helper |
 
 ## Reproduction
 

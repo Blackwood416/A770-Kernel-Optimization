@@ -6,6 +6,11 @@ relative to the skill root. If a deployment strips the scripts, verify script
 existence before invoking them; in that case this page is an interface
 contract only and no command may be reported as executed.
 
+These helpers are intentionally thin and optional. They are not a mandatory
+evidence pipeline: a campaign can use a simple script or manual record when
+that is clearer. Full per-experiment metadata is not required for every case
+study.
+
 ## Pipeline
 
 ```text
@@ -158,7 +163,7 @@ python scripts\record_experiment.py --operator gemv --shape 4096x4096 `
     --out artifacts\records\f32_gemv.json
 ```
 
-Required JSON fields:
+Core JSON fields when using `record_experiment.py`:
 
 ```json
 {
@@ -234,6 +239,8 @@ their original `32.0.101.8724` provenance.
 - Before invoking any harness command, verify that the script exists. If it
   is unavailable, treat `automation.md` as an interface contract only and do
   not claim the script was executed.
+- Do not force every experiment through the full record schema; use the
+  helpers for correctness and timing, and keep case studies readable.
 - The correctness contract is machine-readable: the executable reports
   `rel_tol`, `abs_tol`, `reference`, and `semantics_id`. Requested tolerance
   must equal executable-reported tolerance; `FAIL` is `invalid` unless
