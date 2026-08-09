@@ -70,6 +70,8 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 | 16x24 tile (ESIMD) | 0.1004 to 0.1013 ms | 0.0992 ms | Slightly worse; single-wave assumption failed |
 | `dpasw` to save instructions | No gain | - | For 16x16 tile it emits the same number of instructions as `dpas` |
 | A SLM relay + 4-buffer B (32 KB) | Run failure | - | Pair loop conflicts 2 A buffers with 2-block lookahead; abandoned |
+| ESIMD 16x16 SLM DPAS GEMM | Device lost | - | Reproducible `UR_RESULT_ERROR_DEVICE_LOST`; the shipped small-M path uses DPAS8 |
+| ESIMD 16x16 global DPAS GEMM | Access violation | - | Windows `0xC0000005`; keep DPAS8 for shippable code |
 | GEMV x SLM relay | 0.229 ms | 0.215 ms direct L2 | x is only 16 KB and L1/L2 already reuse it; SLM adds barrier and instruction overhead |
 | GEMV forced `sub_group_size<16>` | 0.228 to 0.258 ms | 0.215 ms dynamic per-lane | The compiler's 32-lane default was faster for the row-per-sub-group shape |
 | GEMV pointer hoisting | 0.258 to 0.323 ms | 0.215 ms index-math kernel | Compiler already converts `row*N+col` into increments; explicit hoisting added register pressure |
@@ -102,6 +104,9 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - Initialize every local reduction accumulator before `atomic_ref::fetch_add`. An uninitialized RMSNorm `local_accessor` row-sum array produced `max_err ~1.48` and failed every element; the kernel otherwise looked correct.
 - oneDNN RMSNorm is a normalization flag, not a separate primitive: use `layer_normalization_forward` with `use_scale | rms_norm` and `forward_inference`, then verify against the CPU reference.
 - Library baselines must pass the same CPU reference. oneDNN `1xK` and a naive oneMKL gemv call both looked plausible but computed the transposed operator for row-major A.
+- oneMKL row-major A/B must be called through a column-major view
+  (`gemm(N,M,K,...)`); passing row-major dimensions directly caused device
+  loss and wrong results.
 - When timing a GEMV built from SYCL buffers, the first submission can include host-to-device copies. Allocate device/aligned USM once, warm up, then time the loop.
 - For row-reduction kernels, treat `sycl::reduce_over_group` as a group API: pass `it.get_group()` for a whole work-group or a `sub_group`, never the `nd_item`. This is a compile-time gate, not a tuning choice.
 - `vec<float,16>` fast paths are alignment-sensitive. If the input comes from `std::vector` or a SYCL buffer over host memory, do not assume 64 B alignment; either copy into aligned USM or use the scalar SLM path.

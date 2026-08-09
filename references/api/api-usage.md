@@ -233,6 +233,11 @@ Pass the packed weights buffer as `[N, K/2]` bytes, low nibble first along K. Pa
 
 SYCL `dpas` cannot run this mixed f16/u4 shape directly. The stable SYCL fallback is host-dequantized u4 -> bf16 followed by the bf16 ESIMD DPAS kernel; that lands at 0.060 to 0.061 ms versus oneDNN's 0.033 to 0.034 ms.
 
+oneDNN 3.11.2 rejects the u4 primitive descriptor when `fpmath_mode` is left
+unset; use `strict` or `any` with `apply_to_int=true`. For the M=64
+weight-only decode GEMV, f16 src is the accuracy-matched path and bf16 src
+selects `jit:gemm:any` but fails the required tolerance.
+
 ## Build and Run Commands
 
 Windows oneAPI (user-validated):

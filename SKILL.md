@@ -24,7 +24,9 @@ attention/conv campaigns.
 ## How to Use This Skill
 
 1. Classify the operator first:
-   - Dense GEMM / GEMV / RMSNorm / Softmax: [techniques.md](references/techniques/techniques.md)
+   - Dense GEMM / GEMV / RMSNorm / Softmax:
+     [techniques.md](references/techniques/techniques.md),
+     [gemm-shape-crossover.md](references/techniques/gemm-shape-crossover.md)
    - Irregular shapes, gather/scatter, sparse GEMM: [irregular-shapes.md](references/techniques/irregular-shapes.md)
    - Full reduction, atomic contention, work-group scan: [reductions-scan.md](references/techniques/reductions-scan.md)
    - Flash attention, direct convolution: [attention-conv.md](references/techniques/attention-conv.md)
@@ -147,8 +149,15 @@ Full hardware details and measured bandwidth/stride tables:
 
 - Dense GEMM: `[MEASURED]` bf16 1024x1536x512: ESIMD DPAS with host-side
   operand layout was the best stable SYCL path; joint_matrix is the portable
-  fallback. See
+  fallback. At this shape the custom path reaches about 90% of oneDNN; the
+  M-dependent crossover below decides when the library is the better target.
+  See
   [techniques.md](references/techniques/techniques.md#the-full-ladder).
+- GEMM/GEMV shape crossover: `[DISPATCH]` bf16 GEMM/GEMV uses oneDNN
+  `jit:gemm:any` except `N=14336, K=4096, M<=16` where DPAS8 wins; f32 GEMM
+  is a oneMKL/oneDNN tie; f32 GEMV on device events uses oneDNN for `M<=64`
+  and oneMKL for `M>=256`, while wall time favors oneMKL at every M. See
+  [gemm-shape-crossover.md](references/techniques/gemm-shape-crossover.md).
 - GEMV: `[MEASURED]` f32 4096x4096 standard-SYCL champion is
   sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
   derived from the actual sub-group size (0.215 ms device median). The ESIMD
@@ -162,10 +171,10 @@ Full hardware details and measured bandwidth/stride tables:
   [techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a).
 - Weight-only decode GEMV: `[MEASURED]` M=64, N=8192, K=8192, gs=128:
   packed load -> unpack -> FMA 41.47 ms, device unpack -> VNNI SLM -> DPAS
-  5.65 ms, host predequant + DPAS 0.645 ms, oneDNN u4 `ba` + scales + zp8
-  `jit:gemm:any` 0.219 ms. The oneDNN number is a fastest-library lower bound
-  that fails the required tolerance at M=64, so it is not comparable for
-  speedup. M=1 DPAS is a negative path. See
+  5.65 ms, host predequant + DPAS 0.656 ms, accuracy-matched oneDNN (f16 src,
+  strict/any, f32 dst, `jit:gemm:any`) 0.209 ms at gs=128. Device ratio
+  R3/oneDNN is about 3.1x; bf16-src oneDNN remains fastest-only and fails the
+  tolerance. M=1 DPAS is a negative path. See
   [weight-only-gemv.md](references/weight-only-gemv.md).
 - Row reductions (RMSNorm/Softmax): `[MEASURED]` f32 1024x4096: stage the row
   in SLM and normalize from SLM; shrink WG size for short rows. For RMSNorm

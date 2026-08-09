@@ -70,7 +70,7 @@ skill revision.
 
 | Area | Applied fix |
 |---|---|
-| Accuracy-aware baseline | Split `matched` / `fastest` / `unknown`; added `reference_tolerance`, `baseline_correctness_status`, `comparable_for_speedup` to contract and record schema |
+| Accuracy-aware baseline | Split `matched` / `fastest` / `unknown`; added `reference_tolerance`, `baseline_correctness_status`, `comparable_for_speedup`; follow-up probe found a matched f16-src oneDNN config for weight-only M=64 |
 | RMSNorm dispatch noise | Added 3% tie handling and simplified production regions instead of per-cell argmin dispatch |
 | Evidence taxonomy | Added `[CORRECTNESS]` and `[TOOLCHAIN]`; reclassified weight-only packed-offset, M=1, and mixed-precision DPAS claims |
 | Self-contained harness | Bundled core scripts and example kernels under `scripts/` / `examples/`; added script-existence gate |

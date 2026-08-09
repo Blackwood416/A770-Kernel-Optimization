@@ -139,6 +139,9 @@ records separate when comparing numbers.
 
 Copy-ready kernel and fallback rule: [f32 GEMV core](../api/code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
 
+For M-dependent GEMM/GEMV dispatch across `M=1..1024`, see
+[gemm-shape-crossover.md](gemm-shape-crossover.md).
+
 ### Why the GEMV steps work
 
 - Sub-group-per-row changes the A access pattern from one thread walking a full 16 KB row to 16/32 lanes covering one row in contiguous 1 KB/512 B chunks, which reduces load instruction count and improves memory-level parallelism.
