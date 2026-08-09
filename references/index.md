@@ -25,6 +25,7 @@ measured tables, rules, and negative results.
 | Compiler behavior and codegen | [workflow/codegen.md](workflow/codegen.md) | Codegen campaign |
 | Robustness, watchdog, TDR protocol | [workflow/robustness.md](workflow/robustness.md) | Robustness campaign |
 | Reusable benchmark/verify/record harness | [workflow/automation.md](workflow/automation.md) | Automation harness campaign |
+| Skill behavior evaluation and text audit | [workflow/evaluation.md](workflow/evaluation.md) | SkillEval campaign |
 | Pitfalls and negative results | [workflow/pitfalls.md](workflow/pitfalls.md) | All campaigns |
 | API usage forms | [api/api-usage.md](api/api-usage.md) | All campaigns |
 | Copy-ready core kernels | [api/code-snippets.md](api/code-snippets.md) | All campaigns |

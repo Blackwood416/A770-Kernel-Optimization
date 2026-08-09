@@ -11,11 +11,15 @@ All numbers are measured on Intel Arc A770 (DG2) with oneAPI 2026.1 and
 driver `32.0.101.8724` on Windows; re-measure before transferring them to
 another GPU, driver, or compiler.
 
-Measured campaign results include: bf16 GEMM 1.95 ms to 0.0614 ms (about 87%
-of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to 0.201 ms (ESIMD), RMSNorm
-5.382 ms to 0.098 ms, Softmax 5.55 ms to 0.107 ms, plus bandwidth/roofline,
-execution model, compiler, irregular-shape, numerics, reduction/scan,
-robustness, and attention/conv campaigns.
+Measured campaign results include: bf16 GEMM 1.95 ms to 0.0614 ms
+(1024x1536x512; about 87% of oneMKL, 90% of oneDNN), f32 GEMV 2.65 ms to
+0.201 ms device median (4096x4096; see
+[techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a)),
+RMSNorm 5.382 ms to 0.098 ms (f32 1024x4096; see
+[rmsnorm-shape-sweep.md](references/rmsnorm-shape-sweep.md)), Softmax 5.55 ms
+to 0.107 ms (f32 1024x4096), plus bandwidth/roofline, execution model,
+compiler, irregular-shape, numerics, reduction/scan, robustness, and
+attention/conv campaigns.
 
 ## How to Use This Skill
 
@@ -134,12 +138,14 @@ Full hardware details and measured bandwidth/stride tables:
   [techniques.md](references/techniques/techniques.md#the-full-ladder).
 - GEMV: `[MEASURED]` f32 4096x4096 standard-SYCL champion is
   sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
-  derived from the actual sub-group size (0.215 ms). The ESIMD
+  derived from the actual sub-group size (0.215 ms device median). The ESIMD
   one-work-item-per-row path with 256 B block loads measured faster on
   `4096x4096` (0.201 ms), `1024x4096` (0.091 ms vs 0.127 ms), and `64x128`
-  (0.0039 ms vs 0.0075 ms). oneMKL still wins device time (0.166 ms at
-  `4096x4096`); oneDNN `Kx1` used `jit:gemm:any` at 0.456 ms event / 0.685 ms
-  verbose on the same shape. See
+  (0.0039 ms vs 0.0075 ms). All crossover values are device-time medians
+  (SYCL events); wall medians are recorded separately and can change the
+  champion (at `64x128`, ESIMD also has the lowest wall time). oneMKL still
+  wins device time (0.166 ms at `4096x4096`); oneDNN `Kx1` used
+  `jit:gemm:any` at 0.456 ms event / 0.685 ms verbose on the same shape. See
   [techniques.md](references/techniques/techniques.md#f32-gemv-ladder-4096x4096-row-major-a).
 - Weight-only decode GEMV: `[MEASURED]` M=64, N=8192, K=8192, gs=128:
   packed load -> unpack -> FMA 41.47 ms, device unpack -> VNNI SLM -> DPAS
@@ -152,9 +158,10 @@ Full hardware details and measured bandwidth/stride tables:
   shape-dispatch map instead of one champion. See
   [rmsnorm-shape-sweep.md](references/rmsnorm-shape-sweep.md) and
   [techniques.md](references/techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32).
-- Irregular/sparse: `[HEURISTIC]` from `M=K=512, N=8, f32`: CSR for >=90%
-  sparsity, BSR B4 for about 50%, scalar-chunk fallback for non-16-aligned
-  shapes. See
+- Irregular/sparse: `[HEURISTIC]` sparse GEMM `M=K=512, N=8, f32`: CSR for
+  sparsity >= 90%, BSR B4 for about 50%. `[HEURISTIC]` GEMV/softmax fallback
+  (f32, M=64/96, cols 256-4096) uses the scalar-chunk SLM path for
+  non-16-aligned shapes. See
   [irregular-shapes.md](references/techniques/irregular-shapes.md).
 - Reduction/scan: `[MEASURED]` 4096x4096 f32 full sums and 1M f32
   one-element-per-lane scans: global atomic (one per sub-group) or tree;
@@ -164,8 +171,10 @@ Full hardware details and measured bandwidth/stride tables:
   KV=256 D=64`: naive three-kernel attention wins. `[MEASURED]` f32 Q=1
   decode `B=4 Hq=8 Hkv=8/2/1 KV=512..32768 D=64/128`: naive wins only at
   KV=512; `kv_cache_chunk_layout`/`online_causal_fused` take over at
-  KV>=2048, with paged KV close behind. NHWC conv wins only with OC cache
-  blocking. See
+  KV>=2048, with paged KV close behind. Wall-time and device-time champions
+  may differ; report both (tables in `attention-decode.md`); host overhead is
+  104-279 us per decode call and dominates wall time at small KV. NHWC conv
+  wins only with OC cache blocking. See
   [attention-conv.md](references/techniques/attention-conv.md) and
   [attention-decode.md](references/techniques/attention-decode.md).
 - Numerics: `[MEASURED]` small f32/bf16/f16/int8 shapes: keep f32 accumulators
@@ -175,8 +184,10 @@ Full hardware details and measured bandwidth/stride tables:
   `fused device delta < launch gap + host overhead saved`; reuse graphs for
   repeated small pipelines. See
   [execution.md](references/workflow/execution.md).
-- Codegen: `[MEASURED]` simple non-XMX bf16 loops: O2 auto-vectorizes; try
-  explicit unroll=2 before flags. See [codegen.md](references/workflow/codegen.md).
+- Codegen: `[MEASURED]` simple non-XMX bf16 loops (GEMM 1024x1536x512,
+  RMSNorm 1024x4096): O2 auto-vectorizes. `[HEURISTIC]` start with explicit
+  unroll=2, then re-measure. See
+  [codegen.md](references/workflow/codegen.md).
 - Risk isolation: `[BUG]` driver/oneAPI-version-specific: `load_2d` hangs,
   `named_barrier` is rejected at device JIT, and large SLM geometries can
   trigger device loss. See
@@ -232,3 +243,5 @@ Complete evidence: [pitfalls.md](references/workflow/pitfalls.md).
 
 - Topic map and campaign index:
   [references/index.md](references/index.md).
+- Skill behavior eval and applied text audit:
+  [workflow/evaluation.md](references/workflow/evaluation.md).

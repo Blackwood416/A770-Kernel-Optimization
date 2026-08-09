@@ -239,7 +239,9 @@ cmd /c '"%ONEAPI_ROOT%\setvars.bat" && icx-cl /fsycl gemm.cpp /Fe:gemm.exe'
 cmd /c '"%ONEAPI_ROOT%\setvars.bat" && gemm.exe'
 ```
 
-Large GRF option (measured negative on A770 for joint_matrix and ESIMD; keep only for verification):
+Large GRF option (negative for joint_matrix/XMX and ESIMD kernels at JIT;
+measured positive only for AOT + unroll4 simple non-XMX bf16 loops; see
+[codegen.md](../workflow/codegen.md). Keep only for verification):
 
 ```bat
 icx-cl /fsycl -Xsycl-target-backend "-options -ze-opt-large-register-file" gemm.cpp /Fe:gemm.exe

@@ -168,6 +168,11 @@ The harness validates the full pipeline, not a new kernel record. Use it to
 turn future campaigns into machine-readable JSON instead of Markdown-only
 results.
 
+Provenance: this is the automation harness smoke record
+(standard-SYCL `sycl_subgroup_direct_l2`, warmup 20 + samples 20 + batch 100,
+run 2026-08-08). It is a separate campaign from the dense-operator GEMV
+ladder in `techniques.md`; retain the harness metadata when comparing values.
+
 ## Rules
 
 - Keep generated reports free of machine-specific absolute paths; command

@@ -139,7 +139,10 @@ Only small-KV naive rows were flagged:
 1. `[MEASURED]` At `KV=512`, the three-kernel naive path wins wall and device
    time for MHA/GQA/MQA at both D values (`492-655 us` device). At `KV=2048`,
    `kv_cache_chunk_layout` or `online_causal_fused` take over depending on
-   mode; the difference from naive is already visible in device time.
+   mode; the difference from naive is already visible in device time. At
+   `KV=2048, D=128, GQA`, the wall champion is `kv_cache_chunk_layout`
+   (1418.1 us) and the device champion is `online_causal_fused`
+   (1306.4 us); always report both bases.
 2. `[MEASURED]` At `KV=8192, D=64`, the online causal fused path wins device
    time (`1501-1811 us`); at `KV=8192, D=128`, `kv_cache_chunk_layout` wins
    (`3430-4583 us`). The same split continues at `KV=32768`: D=64 prefers

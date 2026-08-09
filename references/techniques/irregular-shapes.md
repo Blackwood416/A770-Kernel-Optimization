@@ -10,7 +10,8 @@ Measured on Intel Arc A770, oneAPI 2026.1, Level-Zero, f32 64 B aligned USM.
 
 Rows fixed at 64. `fast` is the 64 B aligned `vec<float,16>` SLM path,
 `fallback` is the scalar-chunk SLM path, `naive` is one work-item per row.
-oneDNN uses `softmax_accurate`, axis=1. Times are us/run.
+oneDNN uses `softmax_accurate`, axis=1. Times are wall-time means per run:
+100 warmup + 1000 timed launches with `q.wait()`, repeated 3 times.
 
 | cols | fast vec | fallback scalar | naive row | oneDNN |
 |---:|---:|---:|---:|---:|
@@ -40,6 +41,9 @@ Rules:
 Default `M=64`; dynamic case `M=96, N=1536`. `fast` is sub-group-per-row with
 `vec<float,16>` and per-lane trip counts from the actual sub-group size.
 oneDNN baseline is `Kx1` matmul, verified against the CPU reference.
+Times are wall-time means per run: 100 warmup + 1000 timed launches with
+`q.wait()`, repeated 3 times. Device/pipeline medians were not recorded in
+this campaign and must not be mixed with SYCL-event tables.
 
 | cols | fast vec16 | scalar row | oneDNN Kx1 |
 |---:|---:|---:|---:|
@@ -57,9 +61,10 @@ Rules:
 1. `[HEURISTIC]` fast path requires `M % 32 == 0 && N % 16 == 0`; never
    hardcode a 16-lane per-lane trip count because A770 may compile with
    32-lane sub-groups.
-2. Non-16-aligned GEMV is the largest fallback gap: 1025 is about `34.7x`
-   slower than the aligned fast path and 2011 is about `41.1x`. If such shapes
-   are common, add a padded/tail-vector fast path instead of staying scalar.
+2. `[MEASURED]` f32 M=64 on A770: N=1025 is about `34.7x` slower than N=1024
+   and N=2011 is about `41.1x` slower than N=2048. Re-measure for other M/N
+   before reuse. If such shapes are common, add a padded/tail-vector fast
+   path instead of staying scalar.
 
 ## Gather / Scatter
 
@@ -94,8 +99,9 @@ Rules:
 
 ## Negative Results
 
-- Non-16-aligned GEMV fallback is the largest gap: 1025 measured about 34.7x
-  slower than the aligned fast path and 2011 about 41.1x.
+- Non-16-aligned GEMV fallback is the largest gap at the measured f32 M=64
+  pairs: N=1025 is 34.7x slower than N=1024 and N=2011 is 41.1x slower than
+  N=2048.
 - BSR B16 at M=512 is launch-bound with only 32 row-block work-items and is
   not a fair tile-size comparison.
 - At the tested gather/scatter lengths (~1-2K), there is no repeatable

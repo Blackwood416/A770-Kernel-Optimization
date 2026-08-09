@@ -131,6 +131,12 @@ Crossover across shapes (device median, ms):
 The `64x128` standard-SYCL row uses a `vec4` sub-group-per-row fallback; the
 `vec16` fallback is 0.0358 ms because only 8 of 32 lanes are useful.
 
+Provenance: the ladder and crossover rows above are device-time medians from
+the dense-operator campaign (10 warmup + 20 samples). The automation harness
+smoke record measured the same standard-SYCL variant at 229.28 us device /
+331.86 us wall (20 warmup + 20 samples, batch 100, 2026-08-08); keep the two
+records separate when comparing numbers.
+
 Copy-ready kernel and fallback rule: [f32 GEMV core](../api/code-snippets.md#f32-gemv-core-sub-group-per-row-direct-l2).
 
 ### Why the GEMV steps work
