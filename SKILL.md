@@ -33,7 +33,9 @@ attention/conv campaigns.
    - Decode attention (Q=1, GQA/MQA, paged KV): [attention-decode.md](references/techniques/attention-decode.md)
    - Precision, accumulator, tolerance, math modes: [numerics.md](references/techniques/numerics.md)
 2. Decide whether the kernel is compute-bound or memory-bound with the
-   bandwidth microbenchmark and roofline ridge: [bandwidth.md](references/hardware/bandwidth.md).
+   bandwidth microbenchmark and roofline ridge:
+   [bandwidth.md](references/hardware/bandwidth.md),
+   [dram-contiguous-roofline.md](references/hardware/dram-contiguous-roofline.md).
 3. Before tuning a small kernel, measure launch gap and host overhead:
    [execution.md](references/workflow/execution.md).
 4. Before changing compiler flags, unrolling, AOT, or large GRF, read the
@@ -145,7 +147,7 @@ actually used; if it differs from the requested tolerance, the record is
 | Cache | L1 192 KB per Xe-core; L2 16 MB |
 | XMX bf16 DPAS | 8x8x16 on DG2; B must be VNNI-packed |
 | `block_load` | 256 B max on DG2 (512 B is PVC-only) |
-| Strided DRAM-like read | 277 GB/s measured; contiguous ceiling pending |
+| Strided DRAM-like read | 277 GB/s measured; contiguous read 291 GB/s |
 | L2-resident read | 855 GB/s measured |
 | SLM read | 4.1 TB/s measured |
 
@@ -162,10 +164,13 @@ Full hardware details and measured bandwidth/stride tables:
   See
   [techniques.md](references/techniques/techniques.md#the-full-ladder).
 - GEMM/GEMV shape crossover: `[DISPATCH]` bf16 GEMM/GEMV uses oneDNN
-  `jit:gemm:any` except `N=14336, K=4096, M<=16` where DPAS8 wins; f32 GEMM
-  is a oneMKL/oneDNN tie; f32 GEMV on device events uses oneDNN for `M<=64`
-  and oneMKL for `M>=256`, while wall time favors oneMKL at every M. See
-  [gemm-shape-crossover.md](references/techniques/gemm-shape-crossover.md).
+  `jit:gemm:any` except `N=14336, K=4096, M<=16` where DPAS8 wins and
+  `M>=24` uses oneDNN; f32 GEMM is a oneMKL/oneDNN tie; f32 GEMV-N1 on device
+  events uses oneDNN for `M<=64` and oneMKL for `M>=192`, while wall time
+  favors oneMKL at every M. The unswept gaps `17-23` and `65-191` are
+  `[HEURISTIC]`. See
+  [gemm-shape-crossover.md](references/techniques/gemm-shape-crossover.md) and
+  [gemm-crossover-boundary.md](references/techniques/gemm-crossover-boundary.md).
 - GEMV-N1 (`A[M,K] x[K] -> y[M]`): `[MEASURED]` f32 4096x4096
   standard-SYCL champion is
   sub-group-per-row with `vec<float,16>` loads and per-lane trip counts
@@ -194,6 +199,9 @@ Full hardware details and measured bandwidth/stride tables:
   both. See
   [rmsnorm-shape-sweep.md](references/rmsnorm-shape-sweep.md) and
   [techniques.md](references/techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32).
+  For high-CV tie decisions, use paired/interleaved deltas instead of
+  independent absolute medians; see
+  [rmsnorm-paired-bench.md](references/rmsnorm-paired-bench.md).
 - Irregular/sparse: `[HEURISTIC]` sparse GEMM `M=K=512, N=8, f32`: CSR for
   sparsity >= 90%, BSR B4 for about 50%. `[HEURISTIC]` GEMV/softmax fallback
   (f32, M=64/96, cols 256-4096) uses the scalar-chunk SLM path for

@@ -49,7 +49,9 @@
 `[DISPATCH]`
 
 - `N=14336`, `K=4096`, `M<=16`: `dpas_bf16`.
-- Otherwise: `onednn_bf16` (`jit:gemm:any`).
+- `N=14336`, `K=4096`, `M>=24`: `onednn_bf16` (`jit:gemm:any`).
+- `17<=M<=23`: not measured, `[HEURISTIC]`.
+- All other swept bf16 GEMM/GEMV shapes: `onednn_bf16`.
 
 Measured anchors:
 
@@ -71,20 +73,20 @@ measured deployment target and its wall advantage is reproduced.
 `[DISPATCH]` device-event rule:
 
 - `M<=64`: `onednn_f32`.
-- `M>=256`: `mkl_f32`.
-- `M=128`: tie; either path.
+- `M>=192`: `mkl_f32`.
+- `65<=M<=191`: `[HEURISTIC]`; K=4096 switches at M=96, K=14336 switches
+  between M=128 and M=192.
 
 Wall-time rule for deployment: `mkl_f32` at all M. oneDNN's tiny-M device win
 is offset by 70-200 us of host/wall overhead. Streaming SYCL and ESIMD GEMV
 routes are not dispatch champions anywhere in this sweep.
 
-### Discrete-to-Inequality Caveat
+### Boundary Interpolation
 
-The sweep measured M values `{1,2,4,8,16,32,64,128,256,512,1024}`. Rules that
-read as intervals (`M<=16`, `M<=64`, `M>=256`) are `[DISPATCH]` only on those
-exact rows and `[HEURISTIC]` for unswept integers such as 3, 7, 12, 48, or
-192. Before promoting an interval to a continuous dispatch, run a boundary
-interpolation sweep around each decision edge.
+The original sweep measured `{1,2,4,8,16,32,64,128,256,512,1024}`. A paired
+boundary interpolation sweep upgraded the two decision edges to continuous
+intervals and left only the two gaps above as `[HEURISTIC]`:
+[gemm-crossover-boundary.md](gemm-crossover-boundary.md).
 
 ## Validity Domains
 
@@ -134,7 +136,7 @@ python sweep.py --samples 20 --warmup 5
 ```
 
 Full per-cell tables are maintained in the campaign's machine-readable
-results; this page keeps the condensed dispatch surface. Packaging the
-campaign sweep runner under `scripts/sweeps/gemm_crossover.py` is pending; the
-commands above currently run from the campaign checkout, not from this skill
-root.
+results; this page keeps the condensed dispatch surface. The campaign sweep
+runner is intentionally left in the campaign checkout: this skill is a
+workflow/guidance layer, not a full optimizer, so commands above run from the
+campaign checkout rather than the skill root.

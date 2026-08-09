@@ -115,12 +115,13 @@ skill revision.
 |---|---|
 | Correctness contract | Executable reports `rel_tol` / `abs_tol` / `max_rel_err` / `reference` / `semantics_id`; mismatch produces `CORRECTNESS_CONTRACT_MISMATCH`; `FAIL` is `invalid` unless relaxed accuracy and same semantics are confirmed |
 | Compare length gate | `compare_outputs.py` now returns `SHAPE_MISMATCH` when actual/expected lengths differ |
-| Roofline wording | Renamed `DRAM ceiling` to strided-pattern baseline; marked empirical ridge and pending contiguous DRAM benchmark |
+| Roofline wording | Renamed `DRAM ceiling` to strided-pattern baseline; measured `B_DRAM_contiguous` and updated empirical DRAM/L2 ridges |
 | GEMV terminology | Split `GEMV-N1` (`A*x`) from `GEMV-M1` (`x*W`) |
 | Dispatch extrapolation | Interval rules stay `[HEURISTIC]` off the measured rows; boundary interpolation sweep required before promotion |
 | Tiny-kernel noise | 3% is documented as a simplification threshold; paired/interleaved measurement is required for significance |
 | Harness tests | Added `scripts/tests/test_harness.py` for tolerance mismatch, invalid/fastest_only, shape mismatch, and JSON contract parsing |
-| Campaign packaging | GEMM crossover reproduction is marked campaign-checkout-only until `scripts/sweeps/gemm_crossover.py` is bundled |
+| Boundary dispatch | Boundary interpolation upgraded bf16 `M<=16` / `M>=24` and f32 GEMV-N1 `M<=64` / `M>=192`; unswept gaps stay `[HEURISTIC]` |
+| Campaign packaging | Intentionally not bundled: the skill is a workflow/guidance layer, not a full optimizer |
 
 ## Reproduction
 

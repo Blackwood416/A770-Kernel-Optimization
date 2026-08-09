@@ -393,8 +393,10 @@ None.
 adjacent cells differ by only 1-5% under high wall-time CV. Do not dispatch on
 argmin alone. Treat a variant as a performance tie when:
 
-- it is within 3% of the cell champion, or
-- MAD/CV intervals clearly overlap.
+- paired delta median is within 3% and the paired MAD interval contains
+  zero (preferred when paired data is available), or
+- paired data is unavailable and independent MAD/CV intervals clearly
+  overlap; this is a simplification choice, not a significance result.
 
 Then choose the simplest, most stable, and broadest implementation: fewer
 dispatch branches, lower SLM, lower register pressure, lower CV, and better
@@ -406,6 +408,33 @@ significance threshold. Many cells have CV > 10%, so a claim that one variant
 is faster than another remains unproven until a paired/interleaved benchmark
 measures per-pair deltas (A/B/B/A or randomized order) instead of independent
 absolute timing runs.
+
+### Paired verification
+
+`[MEASURED]` A paired/interleaved campaign on the current host (oneAPI
+2026.1, driver `32.0.101.8860`) covered f32/f16/bf16 x rows
+`{1, 8, 64, 1024}` x hidden `{256, 1024, 4096, 16384}` with 1000-launch
+A/B/B/A bursts and 20 paired deltas per comparison:
+
+- Keep 3% as a production simplification threshold, not as a statistical
+  tie threshold. In all 12 selected cells where the simplified production
+  choice differed from the exact champion, the simplified candidate was
+  faster or within 2.6% slower on paired wall time; 9 of 12 were faster.
+- Do not widen the threshold to 5%. All 8 paired wall deltas in the 3-5%
+  band had MAD intervals that excluded zero, so 5% would hide reproducible
+  differences.
+- Use paired delta median + MAD instead of independent-absolute 3% when
+  paired data is available. Every selected independent `<=3%` cell (8/8)
+  resolved to a paired delta outside 3%, and only 2 of 51 comparisons had a
+  wall MAD interval containing zero.
+- The simplified production regions in the Dispatch Rule below remain the
+  recommended default. The exact per-cell champion table is the original
+  shape-sweep record on driver `32.0.101.8724`; on the current driver, 9
+  selected exact champions flipped in paired measurement (7 against the
+  second-best family, 7 with a hard `>3%` wall delta).
+
+Details and the full comparison table are in
+[rmsnorm-paired-bench.md](rmsnorm-paired-bench.md).
 
 ## Dispatch Rule
 
