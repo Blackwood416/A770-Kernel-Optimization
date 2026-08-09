@@ -96,6 +96,9 @@ Rules:
 4. `[MEASURED]` avoid BSR tiles that leave too few work-items: at `M=512`,
    B16 has only 32 row-block work-items and is launch-bound. Split large row
    blocks across work-groups instead.
+5. `[CORRECTNESS]` Do not dispatch the N=8 sparse-GEMM rules to `N=4096` or
+   `80%` sparsity without a new sweep; the measured domain is only
+   `M=K=512, N=8`.
 
 ## Negative Results
 

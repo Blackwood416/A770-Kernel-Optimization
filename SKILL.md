@@ -179,7 +179,9 @@ Full hardware details and measured bandwidth/stride tables:
 - Row reductions (RMSNorm/Softmax): `[MEASURED]` f32 1024x4096: stage the row
   in SLM and normalize from SLM; shrink WG size for short rows. For RMSNorm
   rows 1-1024 x hidden 256-16384 in f32/f16/bf16, use the measured
-  shape-dispatch map instead of one champion. See
+  shape-dispatch map instead of one champion. Wall-time and device-time
+  champions differ per cell; ask which target the deployment needs, or report
+  both. See
   [rmsnorm-shape-sweep.md](references/rmsnorm-shape-sweep.md) and
   [techniques.md](references/techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32).
 - Irregular/sparse: `[HEURISTIC]` sparse GEMM `M=K=512, N=8, f32`: CSR for
@@ -222,8 +224,11 @@ Full hardware details and measured bandwidth/stride tables:
 - `[HEURISTIC]` `prefetch` is negative on A770 for GEMM-sized data that fits
   the 16 MB L2.
 - `[BUG]` DPAS `ExecutionSize=16` compiles but produces wrong results on A770.
-- `[ARCH]` `load_2d`, `prefetch_2d`, and `named_barrier` are PVC-only; on A770
-  they hang, are rejected at device JIT, or both.
+- `[ARCH]` `load_2d`, `prefetch_2d`, and `named_barrier` are PVC-only APIs on
+  Xe-HPG.
+- `[BUG]` / `[TOOLCHAIN]` on A770 with oneAPI 2026.1 / driver
+  `32.0.101.8724`, those APIs hang or are rejected at device JIT; re-probe
+  after any toolchain upgrade.
 - `[CORRECTNESS]` Do not hardcode sub-group size 16; A770 can compile
   32-lane sub-groups and a GEMV then covers only half of each row.
 - `[MEASURED]` Do not allocate full 64 KB SLM tiles; keep tiles at 32-48 KB.

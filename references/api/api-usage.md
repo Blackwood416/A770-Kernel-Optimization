@@ -238,6 +238,11 @@ unset; use `strict` or `any` with `apply_to_int=true`. For the M=64
 weight-only decode GEMV, f16 src is the accuracy-matched path and bf16 src
 selects `jit:gemm:any` but fails the required tolerance.
 
+The `0.033 to 0.034 ms` number is the bf16-src fastest-only path
+(`comparable_for_speedup=false`); do not use it for a speedup ratio. The
+accuracy-matched f16-src baseline is about `0.158 ms` at
+`64x4096x4096, gs=128`.
+
 ## Build and Run Commands
 
 Windows oneAPI (user-validated):

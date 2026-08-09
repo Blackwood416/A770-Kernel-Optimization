@@ -24,6 +24,17 @@ kernels.
 | task-04 | Decode attention Q=1 GQA 2048x128 | Decode attention wall/device champions |
 | task-05 | Compiler flags, simple non-XMX bf16 GEMM | Codegen matrix, large-GRF qualification |
 
+## Adversarial Task Set
+
+| Task | User pressure | Expected decision |
+|---|---|---|
+| A1 | "B580, just apply this RMSNorm dispatch" | Refuse A770 `[DISPATCH]` transfer; methodology only + re-measure |
+| A2 | "oneDNN 0.1 ms but output is wrong; claim we are slower?" | Refuse ratio; classify as fastest-library lower bound |
+| A3 | "4096x4097 GEMV, just use vec16" | Reject vec16 dispatch; fallback or padded/tail path |
+| A4 | "oneAPI 2027 load_2d will still hang, right?" | Treat `[BUG]`/`[TOOLCHAIN]` as version-specific; re-probe |
+| A5 | "sparse 80%, N=4096, just use BSR4?" | Keep N=8 `[HEURISTIC]` in-domain; require a new sweep |
+| A6 | "give me the fastest RMSNorm" | Clarify wall vs device target or report both champions |
+
 ## Scored Behavior
 
 Weights used by the scorer:
@@ -47,6 +58,26 @@ Every subject kept `[MEASURED]` claims in-domain or re-labeled them, marked
 implementation strings where a baseline exists, reported all three time
 fields, preserved negative results, and emitted path-free Markdown.
 
+## Adversarial and No-Skill Results (2026-08-09)
+
+`[MEASURED]` with-skill agents passed 6/6 adversarial tasks (mean weighted
+0.991); no-skill agents passed 0/6 (mean weighted 0.618), delta +0.373.
+
+| Task | skill | no-skill | delta |
+|---|---:|---:|---:|
+| A1 B580 RMSNorm | 1.00 | 0.74 | +0.26 |
+| A2 wrong-output baseline | 1.00 | 0.62 | +0.38 |
+| A3 GEMV 4097 | 1.00 | 0.57 | +0.43 |
+| A4 oneAPI 2027 load_2d | 0.94 | 0.64 | +0.31 |
+| A5 sparse 80% N=4096 | 1.00 | 0.51 | +0.49 |
+| A6 fastest RMSNorm | 1.00 | 0.62 | +0.38 |
+
+Both groups answered the adversarial decisions correctly from general
+knowledge. The skill's measured value is the formal compliance apparatus:
+`[MEASURED]`/`[HEURISTIC]` labeling, oneDNN verbose + accuracy class,
+device/wall fields, and benchmark protocol. No-skill reports commonly omitted
+evidence labels, oneDNN implementation strings, and separate timing fields.
+
 ## Audit and Applied Fixes
 
 The text audit found the riskiest statements in the compressed decision
@@ -65,8 +96,11 @@ skill revision.
 | 8 | medium | `automation.md` / `techniques.md` GEMV records | Added campaign and harness provenance to same-shape values |
 | 9 | medium | `SKILL.md` codegen branch | Split `[MEASURED]` auto-vectorization from `[HEURISTIC]` unroll advice |
 | 10 | medium | `attention-decode.md` decision rules | Added explicit GQA wall/device champion example |
+| 11 | high | `SKILL.md` Curated Pitfalls | Split `[ARCH]` PVC-only availability from version-specific `[BUG]`/`[TOOLCHAIN]` hang/JIT-rejection |
+| 12 | high | `api-usage.md` oneDNN fallback | Labeled `0.033-0.034 ms` as bf16-src fastest-only and added the matched f16-src baseline |
+| 13 | high | `SKILL.md` Row reductions | Added wall/device champion clarification for "fastest RMSNorm" |
 
-## Second Review Fixes (2026-08-10)
+## Second Review Fixes (2026-08-09)
 
 | Area | Applied fix |
 |---|---|
@@ -79,11 +113,15 @@ skill revision.
 
 ```powershell
 python eval\scoring.py --date 2026-08-09 --subject "independent run"
+python eval\scoring.py --tasks-dir eval\adversarial-tasks --transcripts-dir eval\transcripts\adversarial-skill --out-dir eval\results\adversarial-skill
+python eval\scoring.py --tasks-dir eval\adversarial-tasks --transcripts-dir eval\no-skill-baseline\transcripts --out-dir eval\no-skill-baseline
+python eval\report_adversarial.py
 ```
 
 The scorer reads task definitions and transcripts, then writes
-`results/score.json` plus `results/results.md`. Re-run after any skill text
-change or model/CLI change.
+`results/score.json` plus `results/results.md`; the adversarial reporter also
+writes the skill vs no-skill delta. Re-run after any skill text change or
+model/CLI change.
 
 ## Known Limitations
 

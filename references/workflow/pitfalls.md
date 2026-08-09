@@ -21,8 +21,8 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](../a
 |---|---|---|
 | `joint_matrix_prefetch` | Unsupported on DG2 | intel/llvm e2e test is marked `UNSUPPORTED: gpu-intel-dg2` |
 | DPAS `ExecutionSize=16` | Compiles, wrong results | `[BUG]` Smoke test: 78/128 errors |
-| `load_2d` / `prefetch_2d` | PVC-only | `[ARCH]` A770 hangs; bf16 `Transposed` rejected at compile time (u32/u64 only) |
-| `named_barrier` | PVC-only | `[TOOLCHAIN]` `memory.hpp`: available only on PVC |
+| `load_2d` / `prefetch_2d` | PVC-only | `[ARCH]` PVC-only; `[TOOLCHAIN]` A770 hangs / bf16 `Transposed` rejected at compile time (u32/u64 only) |
+| `named_barrier` | PVC-only | `[ARCH]` PVC-only; `[TOOLCHAIN]` `memory.hpp`: available only on PVC |
 | `dpas<SystolicDepth=16>` | Compile-time rejected | `static_assert(SystolicDepth == 8)` |
 | `block_load` 512 B | PVC-only | DG2 cap is 256 B |
 | Large GRF `-ze-opt-large-register-file` | Negative or fails | joint_matrix: 211.2 / 180.3 / 193.9 ms vs 143.7 ms baseline; ESIMD run exits with code 1 |

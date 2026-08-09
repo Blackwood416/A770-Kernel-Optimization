@@ -41,10 +41,10 @@ no `VIDEO_TDR_FAILURE` and no new system minidump.
 
 | API / combination | A770 status | Typical symptom | Isolation |
 |---|---|---|---|
-| ESIMD `load_2d` / `prefetch_2d` | PVC-only | kernel hang, no output | one-shot process + 15 s watchdog |
+| ESIMD `load_2d` / `prefetch_2d` | `[ARCH]` PVC-only; `[TOOLCHAIN]` A770 hang | kernel hang, no output | one-shot process + 15 s watchdog |
 | `load_2d` + `Transposed` + bf16 | compile rejection | u32/u64 only gate | compile gate first |
-| ESIMD `named_barrier_init/signal/wait` | XeHPG rejection | JIT error, exit 2 | one-shot process, capture logs |
-| mixed `__esimd_dpas2<u4, fp16>` | compiles, layout unverified | possible wrong results | smoke only |
+| ESIMD `named_barrier_init/signal/wait` | `[ARCH]` PVC-only; `[TOOLCHAIN]` XeHPG rejection | JIT error, exit 2 | one-shot process, capture logs |
+| mixed `__esimd_dpas2<u4, fp16>` | `[TOOLCHAIN]` compiles, layout unverified | possible wrong results | smoke only |
 | DPAS `ExecutionSize=16` | compiles, wrong results | 78/128 errors | keep as failed variant |
 | batch ESIMD submissions (100+, no wait) | historical driver crash | `q.wait()` crash, possible 0x116 | one-shot stress, collect dump |
 | runtime `if/else` inside ESIMD | hang | no output | use `if constexpr` |
