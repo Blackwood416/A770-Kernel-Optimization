@@ -3,7 +3,10 @@
 > Baseline contract: every oneDNN baseline must record the implementation
 > string (`jit:gemm:any`, `ocl:ref:any`, ...), format tags, dtypes, post-ops,
 > fpmath mode, dims, reorder/preprocessing, device time, wall time, and CPU
-> reference correctness. See the oneDNN Baseline Contract in SKILL.md.
+> reference correctness. It must also record `accuracy_class` (`matched` /
+> `fastest` / `unknown`), `reference_tolerance`,
+> `baseline_correctness_status`, and `comparable_for_speedup`. See the oneDNN
+> Baseline Contract in SKILL.md.
 
 ## Table of Contents
 
@@ -323,9 +326,9 @@ Details and the full safety checklist are in
 
 ## Automation and Experiment Records
 
-The reusable harness provides environment probe, build, correctness compare,
-unified benchmark, oneDNN baseline probe, VTune parse, watchdog, and
-`record_experiment.py` with the unified JSON schema:
+The bundled harness under `scripts/` provides environment probe, build,
+correctness compare, unified benchmark, oneDNN baseline probe, VTune parse,
+watchdog, and `record_experiment.py` with the unified JSON schema:
 
 ```powershell
 python scripts\record_experiment.py --operator gemv --shape 4096x4096 `
@@ -350,4 +353,5 @@ full examples:
 6. Verify library baselines with the same CPU reference before trusting their timings; oneDNN `1xK` matmul is `x*A`, not row-major `A*x`.
 7. For steady-state GEMV timing, copy inputs into aligned USM once, warm up, then time the launch loop; a buffer-backed first launch can include host-to-device transfer.
 8. Record the oneDNN implementation string by setting `ONEDNN_VERBOSE=profile,dispatch` before the run; save `jit:gemm:any` vs `ocl:ref:any` with the result.
-9. Follow the unified Benchmark Protocol in SKILL.md: report median, p10/p90 or MAD, flag CV, and separate device time, wall time, and pipeline time.
+9. Record `accuracy_class`, `reference_tolerance`, `baseline_correctness_status`, and `comparable_for_speedup`. A baseline that fails the required tolerance is a fastest-library lower bound, not a speedup competitor.
+10. Follow the unified Benchmark Protocol in SKILL.md: report median, p10/p90 or MAD, flag CV, and separate device time, wall time, and pipeline time.

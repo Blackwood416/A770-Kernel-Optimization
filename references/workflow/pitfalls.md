@@ -1,8 +1,10 @@
 # A770 Pitfalls and Negative Results
 
-> Labels: `[BUG]` for toolchain/driver behavior (version-specific), and
-> `[MEASURED]` for shape-specific negative results. Do not promote a
-> single-shape failure to a universal rule without a validity domain.
+> Labels: `[CORRECTNESS]` for implementation correctness traps, `[TOOLCHAIN]`
+> for API/compiler capability or limits, `[BUG]` for observed
+> toolchain/driver behavior (version-specific), and `[MEASURED]` for
+> shape-specific negative results. Do not promote a single-shape failure to a
+> universal rule without a validity domain.
 
 ## Table of Contents
 
@@ -18,28 +20,28 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](../a
 | Item | Status on A770 | Evidence |
 |---|---|---|
 | `joint_matrix_prefetch` | Unsupported on DG2 | intel/llvm e2e test is marked `UNSUPPORTED: gpu-intel-dg2` |
-| DPAS `ExecutionSize=16` | Compiles, wrong results | Smoke test: 78/128 errors |
-| `load_2d` / `prefetch_2d` | PVC-only | A770 hangs; bf16 `Transposed` rejected at compile time (u32/u64 only) |
-| `named_barrier` | PVC-only | `memory.hpp`: available only on PVC |
+| DPAS `ExecutionSize=16` | Compiles, wrong results | `[BUG]` Smoke test: 78/128 errors |
+| `load_2d` / `prefetch_2d` | PVC-only | `[ARCH]` A770 hangs; bf16 `Transposed` rejected at compile time (u32/u64 only) |
+| `named_barrier` | PVC-only | `[TOOLCHAIN]` `memory.hpp`: available only on PVC |
 | `dpas<SystolicDepth=16>` | Compile-time rejected | `static_assert(SystolicDepth == 8)` |
 | `block_load` 512 B | PVC-only | DG2 cap is 256 B |
 | Large GRF `-ze-opt-large-register-file` | Negative or fails | joint_matrix: 211.2 / 180.3 / 193.9 ms vs 143.7 ms baseline; ESIMD run exits with code 1 |
 | A `block_load` L1/L2 cache hint | Neutral | 0.0641 to 0.0659 ms vs 0.0632 to 0.0646 ms |
 | `esimd::reduce(v, std::plus<float>{})` | Compiles, silently returns 0 | `reduce` only matches `std::plus<>`/`std::multiplies<>`; the typed functor hits an empty branch |
-| Default sub-group size | Not fixed | A770 reports 8/16/32; a GEMV written for 16 lanes produced half sums when the compiler picked 32 |
+| Default sub-group size | Not fixed | `[CORRECTNESS]` A770 reports 8/16/32; a GEMV written for 16 lanes produced half sums when the compiler picked 32 |
 | 2D sub-group mapping | Not along local dim 0 | oneAPI 2026.1 probe with local `(16,32)`: 32-lane sub-groups ran along dim 1 (`sg_gid` tracked `lid0`, `sg_lid` tracked `lid1`); use a 1D `nd_range` or probe the mapping |
-| 64 KB SLM tile | Launch failure | 4 x 4096 float `local_accessor` (65536 B) exited with no diagnostic on A770; keep tiles at 32-48 KB |
-| `group_barrier(it, fence_space)` | Compile error | oneAPI 2026.1 expects a `memory_scope`; use `it.barrier(access::fence_space::local_space)` |
-| oneDNN RMSNorm scale dtype for f16/bf16 | Must be f32 | Passing a `T* gamma` (f16/bf16) to the f32 scale memory corrupted results (`max_abs_err ~2.68`, nearly all elements failed); allocate a separate `float*` scale array |
+| 64 KB SLM tile | Launch failure | `[MEASURED]` 4 x 4096 float `local_accessor` (65536 B) exited with no diagnostic on A770; keep tiles at 32-48 KB |
+| `group_barrier(it, fence_space)` | Compile error | `[TOOLCHAIN]` oneAPI 2026.1 expects a `memory_scope`; use `it.barrier(access::fence_space::local_space)` |
+| oneDNN RMSNorm scale dtype for f16/bf16 | Must be f32 | `[CORRECTNESS]` Passing a `T* gamma` (f16/bf16) to the f32 scale memory corrupted results (`max_abs_err ~2.68`, nearly all elements failed); allocate a separate `float*` scale array |
 | ESIMD SLM/`block_store` experiments (driver 32.0.101.8724) | Full system reboot | Bugcheck `0x00000116` VIDEO_TDR_FAILURE; collected minidump |
-| oneDNN matmul `1xK` as a GEMV baseline | Wrong operator | Computes `x*A` (`A^T*x`); max_err 326 vs the CPU reference, so the 0.182 ms number is not comparable |
+| oneDNN matmul `1xK` as a GEMV baseline | Wrong operator | `[CORRECTNESS]` Computes `x*A` (`A^T*x`); max_err 326 vs the CPU reference, so the 0.182 ms number is not comparable |
 | `sycl::reduce_over_group(nd_item, ...)` | Compile error | oneAPI 2026.1 requires a group object; pass `it.get_group()` or a `sub_group`, not the `nd_item` |
 | `vec<float,16>` on `std::vector`/buffer host memory | Alignment risk | 64 B loads need aligned USM; use `sycl::aligned_alloc_shared/device<float>(64, ...)` on the fast path and a scalar generic path for odd columns |
 | oneDNN u4 matmul, `ab` weights, no scales | `ocl:ref:any` ~110 ms | Plain `ab` u4 did not select a GPU JIT path for f16/u4/bf16 on oneAPI 2026.1 |
 | oneDNN u4 matmul, `ba` weights + scales | `jit:gemm:any` 0.033 to 0.034 ms | `ba` (`[N, K/2]`) + per-group f16 scales + zero-point 8 + `fpmath_mode::any` selects the fast path |
 | oneDNN u4 GEMV, `Kx1` + `ba` weights + scales | `jit:gemm:any` 0.1456 ms | `{K,1}` u4 `ba` (`[1, K/2]`) + `{groups,1}` f16 scales + zp8 works; plain `ab` fails to create the primitive descriptor |
-| SYCL `dpas` mixed f16/u4 | Compile-time rejected | The fp16/bf16 branch asserts `APrecision == BPrecision`; no mixed precision from the public API |
-| Low-level `__esimd_dpas2<u4, fp16, ...>` | No working smoke | oneAPI 2026.1 expected unexpected A/B vector lengths (N1/N2 mismatch); treat as unverified |
+| SYCL `dpas` mixed f16/u4 | Compile-time rejected | `[TOOLCHAIN]` The fp16/bf16 branch asserts `APrecision == BPrecision`; no mixed precision from the public API |
+| Low-level `__esimd_dpas2<u4, fp16, ...>` | No working smoke | `[TOOLCHAIN]` oneAPI 2026.1 expected unexpected A/B vector lengths (N1/N2 mismatch); treat as unverified |
 | Repeated u8 ESIMD batch | Driver crash at `q.wait()` | One-shot u8 kernel was correct, but 100+ batched submissions crashed; use the stable joint_matrix u8 path for production |
 
 ## Structural Experiments That Failed

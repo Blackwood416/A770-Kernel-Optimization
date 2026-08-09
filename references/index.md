@@ -1,7 +1,7 @@
 # Reference Index
 
 Evidence labels (`[ARCH]`, `[MEASURED]`, `[HEURISTIC]`, `[DISPATCH]`, `[BUG]`,
-`[HYPOTHESIS]`) are defined in `SKILL.md`.
+`[CORRECTNESS]`, `[TOOLCHAIN]`, `[HYPOTHESIS]`) are defined in `SKILL.md`.
 
 All measured numbers in this skill come from an Intel Arc A770 (DG2) running
 Windows 11 with oneAPI 2026.1 and driver `32.0.101.8724`. Re-measure before
@@ -24,7 +24,7 @@ measured tables, rules, and negative results.
 | Launch, fusion, graph, host overhead | [workflow/execution.md](workflow/execution.md) | Execution-model campaign |
 | Compiler behavior and codegen | [workflow/codegen.md](workflow/codegen.md) | Codegen campaign |
 | Robustness, watchdog, TDR protocol | [workflow/robustness.md](workflow/robustness.md) | Robustness campaign |
-| Reusable benchmark/verify/record harness | [workflow/automation.md](workflow/automation.md) | Automation harness campaign |
+| Bundled benchmark/verify/record harness | [workflow/automation.md](workflow/automation.md) | Automation harness campaign |
 | Skill behavior evaluation and text audit | [workflow/evaluation.md](workflow/evaluation.md) | SkillEval campaign |
 | Pitfalls and negative results | [workflow/pitfalls.md](workflow/pitfalls.md) | All campaigns |
 | API usage forms | [api/api-usage.md](api/api-usage.md) | All campaigns |

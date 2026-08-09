@@ -387,12 +387,39 @@ None.
 - `[MEASURED]` oneDNN uses `ocl:reusable:vectorized` for all swept shapes/dtypes. It is never the wall-time or device-time champion in this domain.
 - `[BUG]` Pre-sweep `multi` with R=2, f32, hidden=4096 requested a 64 KB SLM tile and failed with `UR_RESULT_ERROR_OUT_OF_RESOURCES`. The final sweep caps total SLM at 32 KB per work-group.
 
+## Tie Handling
+
+`[HEURISTIC]` The per-cell champion table is intentionally exact, but many
+adjacent cells differ by only 1-5% under high wall-time CV. Do not dispatch on
+argmin alone. Treat a variant as a performance tie when:
+
+- it is within 3% of the cell champion, or
+- MAD/CV intervals clearly overlap.
+
+Then choose the simplest, most stable, and broadest implementation: fewer
+dispatch branches, lower SLM, lower register pressure, lower CV, and better
+coverage of odd shapes. Only descend to the exact table when a tested variant
+has a margin above 3%.
+
 ## Dispatch Rule
 
-`[DISPATCH]` operator=RMSNorm forward with per-row `gamma`; dtype=f32/f16/bf16; rows in {1..1024}; hidden in {256..16384}, hidden % 16 == 0; device=A770/oneAPI 2026.1/driver `32.0.101.8724`; confidence=medium (single machine, 5 warmup + 20 samples, high CV flagged). Dispatch on wall time: 
+`[DISPATCH]` operator=RMSNorm forward with per-row `gamma`; dtype=f32/f16/bf16;
+rows in {1..1024}; hidden in {256..16384}, hidden % 16 == 0; device=A770/oneAPI
+2026.1/driver `32.0.101.8724`; confidence=medium (single machine, 5 warmup +
+20 samples, high CV flagged). Dispatch on wall time:
 
-- rows <= 8 and hidden <= 1024: `sg_direct` at WG 32-128 or `slm` at WG 16-64 are within a few tens of microseconds; use the per-shape table because wall noise is high at these sizes.
-- rows <= 8 and hidden >= 2048: `slm` with WG 64-256 wins most wall-time cells; `multi` can win at 256/512 columns.
-- rows >= 16: use `sg_direct` for hidden <= 2048 and `slm` for hidden >= 4096; the WG table for rows 16/1024 gives the exact candidate.
+Simplified production regions (preferred):
 
-The exact champion map above is authoritative; this summary is a `[HEURISTIC]` starting point for hidden values between the swept columns.
+- rows <= 8 and hidden <= 1024: use `sg_direct` at WG 32-128 or `slm` at WG
+  16-64; treat them as tied and pick the lower-complexity `sg_direct` unless a
+  >3% margin favors `slm`.
+- rows <= 8 and hidden >= 2048: `slm` with WG 64-256; `multi` is reserved for
+  hidden 256/512 low-parallelism cells.
+- rows >= 16 and hidden <= 2048: `sg_direct` with the WG table for rows
+  16/1024.
+- rows >= 16 and hidden >= 4096: `slm` with the WG table for rows 16/1024.
+
+The exact champion map above remains the `[MEASURED]` per-cell record; the
+simplified regions above are the `[DISPATCH]` selection for production. Use
+the exact table only when a candidate's measured margin over the simplified
+choice exceeds 3%.

@@ -40,7 +40,9 @@ attention/conv campaigns.
    watchdog: [robustness.md](references/workflow/robustness.md).
 6. Verify every change with the workflow below, and record negative results.
 7. Reuse the measured harness for build, verify, benchmark, baseline, VTune,
-   watchdog, and record workflows:
+   watchdog, and record workflows. The core scripts are bundled under
+   `scripts/`; if a deployment lacks them, verify script existence before
+   claiming execution and treat `automation.md` as an interface contract:
    [automation.md](references/workflow/automation.md).
 
 ## Evidence Levels
@@ -57,12 +59,19 @@ into a universal rule:
 - `[DISPATCH]`: validated across a defined shape range. Safe only when every
   condition in its validity domain holds.
 - `[BUG]`: observed toolchain/driver behavior. Version-specific.
+- `[CORRECTNESS]`: implementation-level correctness constraint or verified
+  trap (packed offset, stride, layout, tail, lane coverage). Usually still
+  applies after toolchain changes.
+- `[TOOLCHAIN]`: oneAPI / IGC / SYCL / ESIMD API or compiler capability or
+  limit. It may change with the toolchain and must be re-probed after an
+  upgrade.
 - `[HYPOTHESIS]`: not sufficiently validated. Must be tested before use.
 
 Every `[DISPATCH]` rule must carry a validity domain: operator, dtype, shape
 range, alignment, tested rows, device, oneAPI version, and confidence. A
 `[MEASURED]` result that is used outside its measured shape must be
-re-labeled `[HEURISTIC]`.
+re-labeled `[HEURISTIC]`. After a toolchain upgrade, re-probe `[BUG]` and
+`[TOOLCHAIN]`; re-check `[CORRECTNESS]`; treat `[ARCH]` as expected to persist.
 
 ## Workflow
 
@@ -107,10 +116,14 @@ Every oneDNN baseline must record:
 - post-ops and `fpmath_mode`
 - runtime/static dims, reorder/preprocessing included
 - device time, wall time, and CPU-reference correctness
+- accuracy class (`matched` / `fastest` / `unknown`), reference tolerance,
+  baseline correctness status, and `comparable_for_speedup`
 
 Enable `ONEDNN_VERBOSE=profile,dispatch` and keep the implementation string;
 it distinguishes "won against a JIT kernel" from "oneDNN fell back to a
-reference path".
+reference path". Do not compute speedup ratios against a baseline that fails
+the required tolerance; classify it as a fastest-library performance
+lower-bound only.
 
 ## Hardware Quick Facts
 
@@ -150,7 +163,9 @@ Full hardware details and measured bandwidth/stride tables:
 - Weight-only decode GEMV: `[MEASURED]` M=64, N=8192, K=8192, gs=128:
   packed load -> unpack -> FMA 41.47 ms, device unpack -> VNNI SLM -> DPAS
   5.65 ms, host predequant + DPAS 0.645 ms, oneDNN u4 `ba` + scales + zp8
-  `jit:gemm:any` 0.219 ms. M=1 DPAS is a negative path. See
+  `jit:gemm:any` 0.219 ms. The oneDNN number is a fastest-library lower bound
+  that fails the required tolerance at M=64, so it is not comparable for
+  speedup. M=1 DPAS is a negative path. See
   [weight-only-gemv.md](references/weight-only-gemv.md).
 - Row reductions (RMSNorm/Softmax): `[MEASURED]` f32 1024x4096: stage the row
   in SLM and normalize from SLM; shrink WG size for short rows. For RMSNorm
@@ -195,37 +210,43 @@ Full hardware details and measured bandwidth/stride tables:
 
 ## Curated Pitfalls
 
-- `prefetch` is negative on A770 for GEMM-sized data that fits the 16 MB L2.
-- DPAS `ExecutionSize=16` compiles but produces wrong results on A770.
-- `load_2d`, `prefetch_2d`, and `named_barrier` are PVC-only; on A770 they
-  hang, are rejected at device JIT, or both.
-- Do not hardcode sub-group size 16; A770 can compile 32-lane sub-groups and
-  a GEMV then covers only half of each row.
-- Do not allocate full 64 KB SLM tiles; keep tiles at 32-48 KB.
-- Large GRF has no universal verdict: negative for joint_matrix/XMX kernels,
-  positive for AOT + unroll4 simple GEMM.
-- One global atomic per thread is wrong for full reductions: it has fewer
-  instructions but is 3.8x slower from address serialization.
-- Keep bf16/f16 accumulators in f32; low-precision accumulators can push
-  reduction error to O(1).
-- `BM=64` flash-attention tiles can trigger `UR_RESULT_ERROR_DEVICE_LOST`;
-  keep BM=32 on the measured shape.
-- Fusing a pack kernel into GEMM is not always a win; apply the measured
-  threshold before fusing.
-- Device-side text LLVM IR is unsupported; keep bitcode, SPIR-V text, and GEN
-  assembly.
-- Host preprocessing belongs outside the timed loop when inputs are static.
-- The second 8-column B slice of a joint-matrix GEMM is `+16 bf16`, not `+8`.
-- Packed u4 byte offset for K offset `bk` is `bk / 2`, not `bk * (BK/2)`;
-  the latter corrupts every K block after the first.
-- M=1 DPAS kernels must replicate row 0 into the 8 DPAS rows and guard output
-  stores; reading rows 1..7 of a one-row buffer can trigger device loss.
-- Decode attention should use a deterministic global two-phase reduce;
-  a single-kernel local-memory online combine produced `1952/2048` errors.
-- Verify library baselines against the CPU reference; oneDNN `1xK` is
-  `x*A`, not `A*x`.
-- VTune `full-compute` ALU0/ALU1 numbers are single-run samples with high
-  variance; compare wall time and `instruction-count` for conclusions.
+- `[HEURISTIC]` `prefetch` is negative on A770 for GEMM-sized data that fits
+  the 16 MB L2.
+- `[BUG]` DPAS `ExecutionSize=16` compiles but produces wrong results on A770.
+- `[ARCH]` `load_2d`, `prefetch_2d`, and `named_barrier` are PVC-only; on A770
+  they hang, are rejected at device JIT, or both.
+- `[CORRECTNESS]` Do not hardcode sub-group size 16; A770 can compile
+  32-lane sub-groups and a GEMV then covers only half of each row.
+- `[MEASURED]` Do not allocate full 64 KB SLM tiles; keep tiles at 32-48 KB.
+- `[MEASURED]` Large GRF has no universal verdict: negative for
+  joint_matrix/XMX kernels, positive for AOT + unroll4 simple GEMM.
+- `[MEASURED]` One global atomic per thread is wrong for full reductions: it
+  has fewer instructions but is 3.8x slower from address serialization.
+- `[CORRECTNESS]` Keep bf16/f16 accumulators in f32; low-precision
+  accumulators can push reduction error to O(1).
+- `[BUG]` `BM=64` flash-attention tiles can trigger
+  `UR_RESULT_ERROR_DEVICE_LOST`; keep BM=32 on the measured shape.
+- `[HEURISTIC]` Fusing a pack kernel into GEMM is not always a win; apply the
+  measured threshold before fusing.
+- `[TOOLCHAIN]` Device-side text LLVM IR is unsupported; keep bitcode,
+  SPIR-V text, and GEN assembly.
+- `[HEURISTIC]` Host preprocessing belongs outside the timed loop when inputs
+  are static.
+- `[CORRECTNESS]` The second 8-column B slice of a joint-matrix GEMM is
+  `+16 bf16`, not `+8`.
+- `[CORRECTNESS]` Packed u4 byte offset for K offset `bk` is `bk / 2`, not
+  `bk * (BK/2)`; the latter corrupts every K block after the first.
+- `[CORRECTNESS]` M=1 DPAS kernels must replicate row 0 into the 8 DPAS rows
+  and guard output stores; reading rows 1..7 of a one-row buffer can trigger
+  device loss.
+- `[CORRECTNESS]` Decode attention should use a deterministic global
+  two-phase reduce; a single-kernel local-memory online combine produced
+  `1952/2048` errors.
+- `[CORRECTNESS]` Verify library baselines against the CPU reference; oneDNN
+  `1xK` is `x*A`, not `A*x`.
+- `[MEASURED]` VTune `full-compute` ALU0/ALU1 numbers are single-run samples
+  with high variance; compare wall time and `instruction-count` for
+  conclusions.
 
 Complete evidence: [pitfalls.md](references/workflow/pitfalls.md).
 

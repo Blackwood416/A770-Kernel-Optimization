@@ -66,6 +66,15 @@ skill revision.
 | 9 | medium | `SKILL.md` codegen branch | Split `[MEASURED]` auto-vectorization from `[HEURISTIC]` unroll advice |
 | 10 | medium | `attention-decode.md` decision rules | Added explicit GQA wall/device champion example |
 
+## Second Review Fixes (2026-08-10)
+
+| Area | Applied fix |
+|---|---|
+| Accuracy-aware baseline | Split `matched` / `fastest` / `unknown`; added `reference_tolerance`, `baseline_correctness_status`, `comparable_for_speedup` to contract and record schema |
+| RMSNorm dispatch noise | Added 3% tie handling and simplified production regions instead of per-cell argmin dispatch |
+| Evidence taxonomy | Added `[CORRECTNESS]` and `[TOOLCHAIN]`; reclassified weight-only packed-offset, M=1, and mixed-precision DPAS claims |
+| Self-contained harness | Bundled core scripts and example kernels under `scripts/` / `examples/`; added script-existence gate |
+
 ## Reproduction
 
 ```powershell

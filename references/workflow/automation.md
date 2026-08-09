@@ -1,9 +1,10 @@
 # Reusable Experiment Harness
 
-The A770 measurement scripts live in a separate harness checkout; this page
-stores the CLI contract, record schema, and workflow so any campaign can reuse
-them without embedding machine-specific paths. All commands below are
-relative to the harness repo root.
+The core A770 measurement scripts are bundled under `scripts/` in this skill,
+with minimal example kernels under `examples/`. All commands below are
+relative to the skill root. If a deployment strips the scripts, verify script
+existence before invoking them; in that case this page is an interface
+contract only and no command may be reported as executed.
 
 ## Pipeline
 
@@ -89,7 +90,10 @@ Runs with `ONEDNN_VERBOSE=profile,dispatch`, saves verbose lines, extracts the
 implementation string, and keeps benchmark plus correctness data. If the
 installed oneDNN build does not emit verbose lines, the script falls back to
 `primitive_desc.impl_info_str()` so the implementation string is still
-recorded.
+recorded. The artifact also records `accuracy_class`, `reference_tolerance`,
+`baseline_correctness_status`, and `comparable_for_speedup`; a baseline that
+fails the required tolerance is classified as `fastest` and must not be used
+for speedup ratios.
 
 ### VTune parse
 
@@ -140,6 +144,10 @@ Required JSON fields:
   "max_abs_err": 1.06112e-05,
   "errors": 0,
   "total": 4096,
+  "accuracy_class": "matched",
+  "reference_tolerance": "rel=0.0001, abs=0.0001",
+  "baseline_correctness_status": "PASS",
+  "comparable_for_speedup": true,
   "vtune": null,
   "status": "PASS"
 }
@@ -162,6 +170,8 @@ Full artifacts add `benchmark` statistics (median, p10/p90, MAD, CV flag),
 | oneDNN implementation | `jit:gemm:any` |
 | oneDNN device_median_us | 467.69 |
 | oneDNN wall_median_us | 632.67 |
+| oneDNN accuracy_class | matched |
+| oneDNN comparable_for_speedup | true |
 | status | PASS |
 
 The harness validates the full pipeline, not a new kernel record. Use it to
@@ -176,7 +186,10 @@ ladder in `techniques.md`; retain the harness metadata when comparing values.
 ## Rules
 
 - Keep generated reports free of machine-specific absolute paths; command
-  examples above are relative to the harness repo root.
+  examples above are relative to the skill root.
+- Before invoking any harness command, verify that the script exists. If it
+  is unavailable, treat `automation.md` as an interface contract only and do
+  not claim the script was executed.
 - Keep failed variants as standalone source files and record them as negative
   results; never delete a failing kernel merely because it failed.
 - Convert `record_experiment.py` output into skill documents with the
