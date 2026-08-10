@@ -7,6 +7,16 @@ VTune 2026.2.
 > and RMSNorm `1024x4096`; conclusions do not transfer to XMX/barrier-heavy
 > kernels without re-measuring.
 
+## Contents
+
+- Fixed kernels
+- Key wall times
+- Compiler done/neutral/harmful matrix
+- Rules
+- Negative results
+- Version-migration checklist
+- Reproduction
+
 ## Fixed Kernels
 
 The sweep uses deliberately simple, non-XMX standard-SYCL kernels, so

@@ -5,6 +5,20 @@
 > output are f32. Every variant is verified against an f64 CPU reference with
 > tolerance `abs=1e-3`; every reported row has `errors: 0/<total>`.
 
+## Contents
+
+- Benchmark protocol
+- Variants
+- MHA, GQA, and MQA wall/device results
+- Host overhead
+- Split-d scan
+- Causal-mask spot check
+- Stability flags
+- Decision rules
+- Dispatch validity domain
+- Negative results
+- Reproduction
+
 ## Benchmark Protocol
 
 - Config matrix: `B=4`, `Q=1`, `KV in {512, 2048, 8192, 32768}`, `D in {64,

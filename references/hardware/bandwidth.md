@@ -7,6 +7,17 @@ transferring them to another GPU, driver, or compiler.
 > Evidence: `[MEASURED]` f32 standard-SYCL kernels over 64 B aligned USM,
 > 4096 workers, message widths 32-256 B, strides 1/16/256 float elements.
 
+## Contents
+
+- Environment and method
+- Measured bandwidth patterns
+- Message-width cost
+- Stride cost
+- Roofline classification
+- Rules
+- Unstable negative results
+- Reproduction
+
 ## Environment and Method
 
 - f32 SYCL kernels over 64 B aligned USM: global read, global copy, global

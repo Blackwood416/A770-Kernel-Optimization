@@ -9,6 +9,14 @@ Evidence scope: `[MEASURED]` on Intel Arc A770 / oneAPI 2026.1 / driver
 `32.0.101.8724`, N/K in `{4096,8192}`, group size in `{32,64,128,256}`.
 Re-measure before transferring to other GPUs, drivers, or shapes.
 
+## Contents
+
+- Compared routes
+- Accuracy-matched and fastest-only oneDNN baselines
+- Toolchain gate
+- Host pre-dequantization boundary
+- Negative results and pitfalls
+
 ## Three Routes Compared
 
 | Route | Idea | M=64 representative |

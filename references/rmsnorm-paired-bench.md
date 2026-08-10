@@ -6,6 +6,18 @@ The original shape sweep was measured on driver `32.0.101.8724`; this paired cam
 
 No new oneDNN primitive was executed here; the oneDNN baseline contract is inherited from [rmsnorm-shape-sweep.md](rmsnorm-shape-sweep.md).
 
+## Contents
+
+- Correctness contract
+- Selection and protocol
+- Simplified production choices
+- Paired simplified-comparison results
+- Exact champion flips
+- Tie-rule evidence
+- All paired comparisons
+- Negative results and caveats
+- Validity domain
+
 ## Correctness Contract
 
 All 51 paired comparisons ran CPU f64 reference checks on the stored dtype. Every variant reported `errors: 0`; no `CORRECTNESS_CONTRACT_MISMATCH` occurred.

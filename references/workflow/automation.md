@@ -11,6 +11,14 @@ evidence pipeline: a campaign can use a simple script or manual record when
 that is clearer. Full per-experiment metadata is not required for every case
 study.
 
+## Contents
+
+- Pipeline overview
+- Environment, build, correctness, benchmark, oneDNN, VTune, watchdog, and record scripts
+- Correctness contract
+- Measured smoke record
+- Rules
+
 ## Pipeline
 
 ```text

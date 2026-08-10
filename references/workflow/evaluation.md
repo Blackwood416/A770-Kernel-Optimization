@@ -7,6 +7,15 @@
 > run date 2026-08-09; confidence = single session, one model/CLI
 > combination.
 
+## Contents
+
+- Purpose and task sets
+- Scored behavior
+- Current, adversarial, and no-skill results
+- Audit and applied fixes
+- Reproduction
+- Known limitations
+
 ## Purpose
 
 The eval harness checks whether an agent that has read this skill follows its

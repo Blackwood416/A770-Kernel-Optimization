@@ -5,6 +5,16 @@ Measured on Intel Arc A770, oneAPI 2026.1, driver `32.0.101.8724`.
 > Evidence: `[BUG]` / `[MEASURED]` behavior is tied to this driver/oneAPI
 > combination; re-run the probes after any toolchain upgrade.
 
+## Contents
+
+- Environment baseline
+- Verified baselines
+- Controlled probe results
+- Risk API table
+- Rules and safety checklist
+- Negative results
+- Commands
+
 ## Environment Baseline
 
 - Device: Intel Arc A770, confirmed at runtime.

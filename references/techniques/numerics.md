@@ -7,6 +7,16 @@ Measured on Intel Arc A770 (Level Zero, driver `32.0.101.8724`), oneAPI
 > `256x4096`, f32/bf16/f16/int8. Tolerances are starting points
 > (`[HEURISTIC]`) for other shapes and data distributions.
 
+## Contents
+
+- Method and scope
+- GEMM, Softmax, and reduction error/performance
+- Tolerance recommendations
+- Math-mode and FTZ observations
+- Rules
+- Negative results
+- Reproduction
+
 ## Method and Scope
 
 - Shapes: GEMM `256x256x256`; Softmax `256x1024`; row reduction `256x4096`.

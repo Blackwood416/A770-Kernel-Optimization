@@ -8,6 +8,17 @@
 > covered in `weight-only-gemv.md`. Re-measure before transferring to another
 > GPU, driver, compiler, or oneDNN build.
 
+## Contents
+
+- Routes
+- Protocol
+- Headline findings
+- Dispatch map and boundary interpolation
+- Validity domains
+- oneDNN baseline contract
+- Negative results
+- Reproduction
+
 ## Routes
 
 | Route | Supports |

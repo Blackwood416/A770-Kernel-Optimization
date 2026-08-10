@@ -4,6 +4,21 @@
 
 `device_time` is the SYCL event duration for SYCL variants and the median of `ONEDNN_VERBOSE=profile,dispatch` exec times for oneDNN. `wall_time` is host submit to wait. `pipeline_time` equals wall time because static inputs are prepared once and there is no per-call host transform in this benchmark.
 
+## Contents
+
+- oneDNN baseline contract
+- Wall-time champion map
+- Device-time champion map
+- Wall-time crossover
+- Device-time crossover
+- oneDNN baseline device/wall results
+- Short-row focus
+- Best SLM work-group by hidden size
+- Stability flags
+- Negative results and failed variants
+- Tie handling and paired verification
+- Dispatch rule
+
 ## oneDNN Baseline Contract
 
 - Primitive: `layer_normalization_forward`, `forward_inference`, flags `use_scale | rms_norm`.

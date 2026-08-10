@@ -6,6 +6,15 @@ Measured on Intel Arc A770, oneAPI 2026.1, Level-Zero, f32 64 B aligned USM.
 > cols 256-4096; sparse GEMM `M=K=512, N=8`. The sparse and fallback rules
 > are `[HEURISTIC]` outside these domains.
 
+## Contents
+
+- Softmax shape cost
+- GEMV-N1 shape cost
+- Gather/scatter
+- Sparse GEMM
+- Negative results
+- Reproduction
+
 ## Softmax Shape Cost
 
 Rows fixed at 64. `fast` is the 64 B aligned `vec<float,16>` SLM path,
