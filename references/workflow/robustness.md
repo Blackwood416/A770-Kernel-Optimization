@@ -47,6 +47,22 @@ no `VIDEO_TDR_FAILURE` and no new system minidump.
 | `__esimd_dpas2<u4, fp16>` (N1=32, N2=64) | passes | no hang, but layout unverified | PASS only as no-hang smoke |
 | 600 batch ESIMD submissions (out-of-order) | passes | no crash; historical 100+ crash not reproduced | PASS (stress10 10/10) |
 
+## DG2 SDP Port Probes (2026-08-10..12)
+
+The ESIMD attention port campaign (see
+[sdpa-a770.md](../techniques/sdpa-a770.md)) added versioned probes on driver
+`32.0.101.8860`:
+
+| Probe | Result | Verdict |
+|---|---|---|
+| Trivial ESIMD kernel, WG=512 (`slm_init` + one store) | GPU TDR, LiveKernelEvent 141 (VIDEO_TDR) | `[BUG]` keep attention WG=32 |
+| RPT=6 / RPT=8 with any compiler spill (0.9-16 KB) | `UR_RESULT_ERROR_DEVICE_LOST` on launch | `[BUG]` zero-spill gate before launch |
+| RPT=6 / BN=128, zero spill | `UR_RESULT_ERROR_DEVICE_LOST` on first launch | `[BUG]` keep RPT=8 / BN=64 non-fused |
+| Non-fused attn WG=64 | Wrong output on a single KV tile, no TDR | `[BUG]` staging/barrier unreliable; keep WG=32 |
+
+The SDP regression gate (finite output plus error threshold) is the required
+entry check before dispatching any new DG2 SDP geometry.
+
 ## Risk API Table
 
 | API / combination | A770 status | Typical symptom | Isolation |
@@ -57,6 +73,9 @@ no `VIDEO_TDR_FAILURE` and no new system minidump.
 | mixed `__esimd_dpas2<u4, fp16>` | `[TOOLCHAIN]` compiles, layout unverified | possible wrong results | smoke only |
 | DPAS `ExecutionSize=16` | compiles, wrong results | 78/128 errors | keep as failed variant |
 | batch ESIMD submissions (100+, no wait) | historical driver crash | `q.wait()` crash, possible 0x116 | one-shot stress, collect dump |
+| ESIMD WG=512 (even trivial kernel) | `[BUG]` TDR on driver `32.0.101.8860` | hang / device lost, LiveKernelEvent 141 | one-shot process + watchdog; keep WG=32 |
+| RPT>4 + any compiler spill (DG2 SDP) | `[BUG]` device lost | `UR_RESULT_ERROR_DEVICE_LOST` on launch | compile zero-spill gate; watchdog; never stack probes |
+| WG=64 non-fused SDP attn | `[BUG]` wrong output, no TDR | barrier/staging unreliable | keep WG=32; rollback geometry |
 | runtime `if/else` inside ESIMD | hang | no output | use `if constexpr` |
 
 ## Rules
@@ -69,6 +88,9 @@ no `VIDEO_TDR_FAILURE` and no new system minidump.
    stacking more risk probes.
 4. Keep failed variants as standalone source files and record the negative
    result with driver/oneAPI versions.
+5. For DG2 SDP geometry, require zero compiler spill and the measured
+   small work-group before launch; treat any non-zero spill with RPT>4 as a
+   TDR trigger and run the SDP regression gate before dispatch.
 
 ## Safety Checklist
 

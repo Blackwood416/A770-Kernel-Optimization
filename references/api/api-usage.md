@@ -261,6 +261,32 @@ measured positive only for AOT + unroll4 simple non-XMX bf16 loops; see
 icx-cl /fsycl -Xsycl-target-backend "-options -ze-opt-large-register-file" gemm.cpp /Fe:gemm.exe
 ```
 
+## DG2 SDP Sidecar Build (Measured Contract)
+
+Measured on A770 / oneAPI 2026.1 / Torch 2.13.0+xpu; see
+[sdpa-a770.md](../techniques/sdpa-a770.md) for the kernel design, dispatch,
+and measured results. On Windows use `icx`, not `icpx`:
+
+```powershell
+cmd /c "call ""<oneAPI setvars.bat>"" --force && call ""<VsDevCmd.bat>"" -arch=amd64 && icx -fsycl -fsycl-targets=spir64_gen -Xs ""-device dg2 -options -doubleGRF"" /O2 /DNDEBUG /EHsc /std:c++17 /DNOMINMAX /DWIN32_LEAN_AND_MEAN /LD /Fe:<sidecar.pyd> <sdp_entry.cpp>"
+```
+
+- `-Xs "-device dg2 -options -doubleGRF"` is required for the DG2 SDP
+  sidecar; an incremental sidecar build measured about 28-30 s.
+- A full wheel build measured about 4-5 minutes with 8-way parallel
+  compilation; the job-count knob is build-system-specific.
+- Wheel identity is tied to Python ABI, Torch minor version, and GPU AOT
+  target; do not rename wheels across those identities.
+- The integration adapter defaults to PyTorch SDPA on Windows; the DG2 ESIMD
+  sidecar must be enabled through the adapter's attention-backend switch.
+- The Python wrapper scans the sidecar extension once and caches the result;
+  keep that cached-glob behavior (uncached glob was about 0.5 ms per call).
+
+Copy-ready cores: [DG2 DPAS 8x8 fp32 core](code-snippets.md#dg2-dpas-8x8-fp32-core),
+[packed Q DPAS A-operand core](code-snippets.md#packed-q-dpas-a-operand-core),
+[stable online-softmax rescale core](code-snippets.md#stable-online-softmax-rescale-core),
+and [host-side dispatch and packed-buffer LRU core](code-snippets.md#host-side-sdp-dispatch-and-packed-buffer-lru-core).
+
 ## IR, SPIR-V, and GEN Assembly Dump
 
 Text device LLVM IR is not supported (`-S -emit-llvm` reports

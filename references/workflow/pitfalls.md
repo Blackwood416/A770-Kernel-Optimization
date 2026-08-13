@@ -13,7 +13,7 @@
 - Behavioral traps
 - Diagnostic traps
 
-Cross-reference: the code that hits these gates lives in [code-snippets.md](../api/code-snippets.md); API details and commands are in [api-usage.md](../api/api-usage.md).
+Cross-reference: the code that hits these gates lives in [code-snippets.md](../api/code-snippets.md); API details and commands are in [api-usage.md](../api/api-usage.md); the SDP-specific campaign is in [sdpa-a770.md](../techniques/sdpa-a770.md).
 
 ## API / Hardware Gates
 
@@ -43,6 +43,9 @@ Cross-reference: the code that hits these gates lives in [code-snippets.md](../a
 | SYCL `dpas` mixed f16/u4 | Compile-time rejected | `[TOOLCHAIN]` The fp16/bf16 branch asserts `APrecision == BPrecision`; no mixed precision from the public API |
 | Low-level `__esimd_dpas2<u4, fp16, ...>` | No working smoke | `[TOOLCHAIN]` oneAPI 2026.1 expected unexpected A/B vector lengths (N1/N2 mismatch); treat as unverified |
 | Repeated u8 ESIMD batch | Driver crash at `q.wait()` | One-shot u8 kernel was correct, but 100+ batched submissions crashed; use the stable joint_matrix u8 path for production |
+| ESIMD work-group 512 (even trivial kernel) | A770 TDR / device lost | `[BUG]` driver `32.0.101.8860`: LiveKernelEvent 141 (VIDEO_TDR) with a kernel that only calls `slm_init` + one store; keep attention WGs at the measured 32 |
+| fp16 DPAS accumulator (`dpas<8,8,half>`) | DG2 rejects; fp16 C wrong | `[TOOLCHAIN]` / `[BUG]` `dpas.hpp` rejects ExecutionSize=8 fp16 C; N=16 compiles but is numerically wrong; use fp32 accumulators |
+| RPT>4 with any compiler spill (DG2 SDP) | `UR_RESULT_ERROR_DEVICE_LOST` | `[BUG]` driver `32.0.101.8860`: spills 0.9-16 KB all crashed; even RPT=6/BN=128 with zero spill crashed on first launch |
 
 ## Structural Experiments That Failed
 
@@ -72,6 +75,15 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 | A SLM relay + 4-buffer B (32 KB) | Run failure | - | Pair loop conflicts 2 A buffers with 2-block lookahead; abandoned |
 | ESIMD 16x16 SLM DPAS GEMM | Device lost | - | Reproducible `UR_RESULT_ERROR_DEVICE_LOST`; the shipped small-M path uses DPAS8 |
 | ESIMD 16x16 global DPAS GEMM | Access violation | - | Windows `0xC0000005`; keep DPAS8 for shippable code |
+| DG2 SDP RPT=6 / RPT=8 with spill (7.5-16 KB) | Device lost | - | A770 TDR trigger; any non-zero spill with RPT>4 is treated as a TDR trigger |
+| DG2 SDP RPT=6 / BN=128, zero spill | Device lost | - | Crashed on first real launch; non-fused path stays RPT=8 / BN=64 |
+| DG2 SDP non-fused WG=64 | Wrong output on single tile | WG=32 correct | Staging/barrier geometry unreliable at WG=64; no TDR but rollback |
+| DG2 SDP fused BN=128 | Numerically wrong (~0.12) | fused BN=64 | Release wrong, debug added 5 KB spill; abandoned |
+| DG2 SDP fused RPT=6 | Compiler spill | RPT=4 | 1.7-2.0 KB at BN=64, 0.9-1.3 KB at BN=32; not launched |
+| DG2 SDP packedV direct global read | 172 ms at BN=64 | 105 ms SLM staging | Cooperative SLM staging wins; do not bypass SLM |
+| DG2 SDP chunk-array score/acc | About 2.3x slower | register vectors | 6.6 KB spill plus register pressure |
+| DG2 SDP manual mask loop-invariant hoist | 18% slower | compiler-scheduled version | Compiler scheduling was better; do not hand-hoist |
+| DG2 SDP fused fp32 score in `svecArr` | Mixed | fp16 `pChunk` | 512/H48 improved (0.82) but 1024 variants regressed |
 | GEMV x SLM relay | 0.229 ms | 0.215 ms direct L2 | x is only 16 KB and L1/L2 already reuse it; SLM adds barrier and instruction overhead |
 | GEMV forced `sub_group_size<16>` | 0.228 to 0.258 ms | 0.215 ms dynamic per-lane | The compiler's 32-lane default was faster for the row-per-sub-group shape |
 | GEMV pointer hoisting | 0.258 to 0.323 ms | 0.215 ms index-math kernel | Compiler already converts `row*N+col` into increments; explicit hoisting added register pressure |
@@ -132,6 +144,12 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - Direct-L2 flash attention loses to SLM staging: `online_direct_l2` measured 3.21 ms vs 2.06 ms for the SLM online path because each d-slice redundantly re-reads K/V.
 - Bare NHWC direct conv is about 6x slower than NCHW direct on the measured shape; NHWC only wins with OC cache blocking plus `[KH][KW][IC][OC]` weight prepack.
 - im2col+GEMM conv layout traps: the GEMM matrix width is OC, not batch N, and im2col K is `[KH][KW][IC]` matching `w_hwio`. The output channel stride must be OC for both NCHW and NHWC outputs.
+- Online-softmax rescale can overflow: `exp2((m_old - m_new) * log2e)` explodes when the new tile max is lower, producing inf/NaN and black video frames at H3 score spans. Keep rescale <= 1 in both directions; the math result is unchanged. Copy-ready: [stable online-softmax rescale core](../api/code-snippets.md#stable-online-softmax-rescale-core).
+- Per-thread softmax/scores/accumulators must not live in shared SLM in an ESIMD attention kernel: 32 lanes race and overwrite each other. Keep per-thread state in registers; SLM holds only shared K/V tiles.
+- Padding-flag writes must not double-apply the tile offset; the `kvZero` bug masked whole tiles and degenerated softmax to uniform.
+- `#if FUSED` is a preprocessing trap for template-dispatched kernels: the condition is constant at preprocessing time, so the fused path can take a nullptr branch and TDR. Use `if constexpr`.
+- Fused V-pack SLM offsets are byte offsets; missing `*4` corrupts the packed V tile.
+- SDP buffer cache keys must include the KV head count; GQA shapes can otherwise reuse a packed buffer of the wrong head count. An unbounded packed Q/K/V cache can hold about 0.9 GB for one `seq ~= 20685` shape and pressure ComfyUI's model residency. Copy-ready: [host-side dispatch/LRU core](../api/code-snippets.md#host-side-sdp-dispatch-and-packed-buffer-lru-core).
 
 ## Diagnostic Traps
 

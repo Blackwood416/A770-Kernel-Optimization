@@ -23,6 +23,7 @@ driver, compiler, library build, shape, or layout.
 | Weight-only GEMV-M1 | [weight-only-gemv.md](weight-only-gemv.md) | INT4/NF4 routes, accuracy-aware oneDNN baseline, and negative paths |
 | Odd, short, gathered, scattered, or sparse shapes | [techniques/irregular-shapes.md](techniques/irregular-shapes.md) | Fast/fallback gates and sparse GEMM measurements |
 | Reduction or scan | [techniques/reductions-scan.md](techniques/reductions-scan.md) | Tree/atomic selection, contention evidence, and scan choices |
+| Dense SDPA / flash attention | [techniques/sdpa-a770.md](techniques/sdpa-a770.md) | ESIMD sidecar port ladder (v1-v4.1), fused/multi-kernel dispatch, measured tables, and SDP-specific negative results |
 | Prefill attention or direct convolution | [techniques/attention-conv.md](techniques/attention-conv.md) | Separate measured attention and convolution ladders |
 | `Q=1` decode attention | [techniques/attention-decode.md](techniques/attention-decode.md) | MHA/GQA/MQA, paged KV, wall/device results, and dispatch domain |
 | Precision, accumulators, math modes, or tolerance | [techniques/numerics.md](techniques/numerics.md) | Error/performance tables and tolerance guidance |

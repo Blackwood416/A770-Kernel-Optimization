@@ -1,6 +1,6 @@
 ---
 name: optimize-a770-kernels
-description: "Optimize SYCL/ESIMD compute kernels on Intel Arc A770/DG2 (Windows). Use measured constants and dispatch rules only for A770; for other Intel GPUs transfer the methodology only and re-measure all hardware-specific assumptions. Covers dense GEMM/GEMV/RMSNorm/Softmax, irregular and sparse shapes, reductions and scans, attention and convolution, numerical tolerance, bandwidth and roofline, launch/fusion/graph overhead, compiler flags and codegen, VTune interpretation, robustness/TDR isolation, and oneMKL/oneDNN baselines."
+description: "Optimize SYCL/ESIMD compute kernels on Intel Arc A770/DG2 (Windows). Use measured constants and dispatch rules only for A770; for other Intel GPUs transfer the methodology only and re-measure all hardware-specific assumptions. Covers dense GEMM/GEMV/RMSNorm/Softmax, flash attention / scaled dot-product attention (SDPA), irregular and sparse shapes, reductions and scans, attention and convolution, numerical tolerance, bandwidth and roofline, launch/fusion/graph overhead, compiler flags and codegen, VTune interpretation, robustness/TDR isolation, and oneMKL/oneDNN baselines."
 ---
 
 # Arc A770 Kernel Optimization
@@ -57,6 +57,7 @@ Before selecting or changing a kernel:
 | Softmax | [Softmax ladder](references/techniques/techniques.md#f32-softmax-ladder) | [irregular shapes](references/techniques/irregular-shapes.md) for short or odd columns |
 | Irregular gather/scatter or sparse GEMM | [irregular shapes and sparse GEMM](references/techniques/irregular-shapes.md) | [numerics](references/techniques/numerics.md) when dtype or tolerance changes |
 | Full reduction or work-group scan | [reductions and scans](references/techniques/reductions-scan.md#selection-rules) | [numerics](references/techniques/numerics.md) for accumulator and tolerance constraints |
+| Flash attention / SDPA, dense multi-row Q/K/V | [A770 SDPA port and optimization](references/techniques/sdpa-a770.md) | [attention and convolution](references/techniques/attention-conv.md) for the small prefill ladder; use the decode page only for `Q=1` |
 | Prefill attention or direct convolution | [attention and convolution](references/techniques/attention-conv.md) | Use the separate decode page only for `Q=1` |
 | Decode attention, `Q=1`, MHA/GQA/MQA or paged KV | [decode attention](references/techniques/attention-decode.md#decision-rules) | Do not substitute the prefill campaign for this route |
 
@@ -180,6 +181,11 @@ be emitted as `[MEASURED]`.
 
 - Run risky ESIMD shapes in isolated one-shot processes with the existing
   watchdog protocol. Do not run multiple GPU pressure processes together.
+- On A770, keep ESIMD attention work-groups small: `WG=512` TDRs even for a
+  trivial kernel, and any non-zero compiler spill with RPT>4 is a device-lost
+  trigger. Follow [the SDPA reference](references/techniques/sdpa-a770.md) and
+  [robustness.md](references/workflow/robustness.md) before trying new
+  attention geometry.
 - Treat hangs, non-zero exits, new minidumps, TDRs, and device loss as
   evidence. Stop stacking risk probes and record the versioned negative
   result.

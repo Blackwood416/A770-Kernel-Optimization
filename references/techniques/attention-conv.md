@@ -6,6 +6,11 @@ Measured on Intel Arc A770, oneAPI 2026.1, standard SYCL + USM, f32.
 > conv `N=4, IC=32, IH=IW=64, OC=64, 3x3` f32. Rules are `[HEURISTIC]` for
 > decode attention, GQA/MQA, paged KV, and other conv shapes.
 
+For the dense multi-row SDPA / flash-attention port campaign (ESIMD sidecar
+v1-v4.1, fp16/bf16, seq up to 16384), see
+[sdpa-a770.md](sdpa-a770.md). This page covers the separate small prefill
+shape and direct convolution.
+
 ## Attention Ladder
 
 Shape: `B=4, H=16, Q=128, KV=256, D=64, kv_start=128`, causal except

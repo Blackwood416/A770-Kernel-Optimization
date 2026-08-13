@@ -27,6 +27,7 @@
 - Reduction tree-atomic cores
 - Scan Hillis-Blelloch cores
 - Attention online core
+- A770 SDPA / flash attention cores
 - Conv cacheblock core
 - Correctness and timing harness
 
@@ -59,6 +60,17 @@ Every step of the measured ladder in [techniques.md](../techniques/techniques.md
 The f32 RMSNorm ladder lives in [techniques.md](../techniques/techniques.md#f32-rmsnorm-ladder-1024x4096-row-major-x-f32); its final kernel is [f32 RMSNorm core](#f32-rmsnorm-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-rmsnorm-baseline).
 
 The f32 Softmax ladder lives in [techniques.md](../techniques/techniques.md#f32-softmax-ladder); its final kernel is [f32 Softmax core](#f32-softmax-core-slm-row-tile) and its oneDNN baseline API is in [api-usage.md](api-usage.md#onednn-softmax-baseline).
+
+The A770 SDPA / flash attention campaign lives in
+[sdpa-a770.md](../techniques/sdpa-a770.md); its cores map as follows:
+
+| Campaign version | Embedded snippet |
+|---|---|
+| v2 DPAS | [DG2 DPAS 8x8 fp32 core](#dg2-dpas-8x8-fp32-core) |
+| v3 packed-KV | [Packed K/V VNNI operand layout core](#packed-kv-vnni-operand-layout-core) |
+| v4 fused/async + correctness | [Stable online-softmax rescale core](#stable-online-softmax-rescale-core), [host-side dispatch and LRU core](#host-side-sdp-dispatch-and-packed-buffer-lru-core) |
+| v4.1 packed-Q RPT8 | [Packed Q DPAS A-operand core](#packed-q-dpas-a-operand-core) |
+| Integration overhead | [Sidecar glob cache core](#sidecar-glob-cache-core-python) |
 
 ## Naive Baseline
 
@@ -1620,6 +1632,328 @@ void run_online(sycl::queue& q, const Config& c, const float* qq,
 
 Do not raise `BM` to 64 on this shape: `BM=64, BN=32, VLEN=8, WG=512` with
 about 40 KB SLM triggered `UR_RESULT_ERROR_DEVICE_LOST`.
+
+## A770 SDPA / Flash Attention Cores
+
+These cores come from the ESIMD SDP sidecar port campaign (measured on A770 /
+driver `32.0.101.8860` / oneAPI 2026.1 / Torch 2.13.0+xpu; see
+[sdpa-a770.md](../techniques/sdpa-a770.md)). They are building blocks, not a
+drop-in operator: keep `WG=32`, fp32 accumulators, and zero compiler spill on
+A770; D=128 is the measured DPAS path, D=64 stayed on an FMA variant.
+
+### DG2 DPAS 8x8 fp32 Core
+
+Full 8x8 DPAS with 8 distinct rows in A. B must already be VNNI-packed:
+`simd<uint32_t, 64>` where each word holds two consecutive fp16/bf16
+elements. A is `ElemT[128]` = 8 rows x 16 elements.
+
+```cpp
+template <typename ElemT>
+ESIMD_INLINE simd<float, 64> dpas8x8(const simd<float, 64>& c,
+                                     const simd<uint32_t, 64>& braw,
+                                     const simd<ElemT, 128>& a) {
+  simd<uint32_t, 64> brawLocal = braw;
+  simd<ElemT, 128> b = brawLocal.template bit_cast_view<ElemT>();
+  return dpas<8, 8, float>(c, b, a);
+}
+```
+
+Measured constraints:
+
+- `dpas<8,1,float>` (M=1) produced noisy scores; replicate one query row
+  across 8 DPAS rows and read row 0 (v2), or feed 8 distinct rows (v4.1).
+- Do not zero-fill A rows 4..7 when C rows 4..7 are never read: measured
+  48 -> 40 ms at L=8192/H=32/D=128 fp16.
+- `ExecutionSize=16` compiles but is numerically wrong on A770; an fp16
+  accumulator is rejected for `ExecutionSize=8`. Keep fp32 accumulation.
+
+### Packed Q DPAS A-Operand Core
+
+Packs Q once into the DPAS A-operand layout so every QK A operand is one
+contiguous 256 B block. Measured in the v4.1 non-fused path with `RPT=8`,
+100% XMX rows, and zero spill.
+
+```cpp
+template <typename ElemT>
+ESIMD_INLINE void packQDg2(
+    uint8_t* packedQ,
+    const uint8_t* qState,
+    uint32_t qLen,
+    uint32_t headQ,
+    sycl::nd_item<1>& ndi) {
+  constexpr int RPT = 8;        // query rows per thread (v4.1 measured)
+  constexpr int DCHUNKS = 8;    // 128 / 16
+  constexpr int WG = 32;
+  constexpr int QGRP = WG * RPT;
+  const int gid = static_cast<int>(ndi.get_group_linear_id());
+  const int lid = static_cast<int>(ndi.get_local_linear_id());
+  const int qTiles = (static_cast<int>(qLen) + QGRP - 1) / QGRP;
+  const int headIdx = gid / qTiles;
+  const int qTile = gid % qTiles;
+  const int qrowBase = qTile * QGRP + lid * RPT;
+  const size_t threadOff =
+      ((static_cast<size_t>(headIdx) * qTiles + qTile) * WG + lid) *
+      RPT * 128;
+
+  simd<ElemT, RPT * 128> qrows = 0;
+#pragma unroll
+  for (int r = 0; r < RPT; r++) {
+    const int qrow = qrowBase + r;
+    if (qrow < static_cast<int>(qLen)) {
+      const ElemT* qp = reinterpret_cast<const ElemT*>(qState) +
+                        (static_cast<size_t>(qrow) * headQ + headIdx) * 128;
+#pragma unroll
+      for (int c = 0; c < DCHUNKS; c++) {
+        qrows.template select<16, 1>(r * 128 + c * 16) =
+            block_load<ElemT, 16>(qp + c * 16, overaligned_tag<16>{});
+      }
+    }
+  }
+#pragma unroll
+  for (int c = 0; c < DCHUNKS; c++) {
+    simd<ElemT, 128> block = 0;
+#pragma unroll
+    for (int r = 0; r < RPT; r++) {
+      block.template select<16, 1>(r * 16) =
+          qrows.template select<16, 1>(r * 128 + c * 16);
+    }
+    block_store<ElemT, 128>(
+        reinterpret_cast<ElemT*>(packedQ) + threadOff + c * 128,
+        block,
+        overaligned_tag<16>{});
+  }
+}
+```
+
+`packedQ` layout is `[head][qTile][thread][dChunk][row][16]`. The measured
+build kept `RPT` configurable; the fused small-shape path used `RPT=4`.
+
+### Packed K/V VNNI Operand Layout Core
+
+Packs K and V once per head/tile into global VNNI operand buffers. K word
+index is `(d/2)*8 + row` (low/high 16 bits = `K[row][2*d]` /
+`K[row][2*d+1]`); V is packed in row pairs. Padding rows outside `kvLen` are
+loaded as zero.
+
+```cpp
+template <typename ElemT>
+ESIMD_INLINE void packKvDg2(
+    uint8_t* packedK,
+    uint8_t* packedV,
+    const uint8_t* kState,
+    const uint8_t* vState,
+    uint32_t kvLen,
+    uint32_t headQ,
+    uint32_t headKv,
+    sycl::nd_item<1>& ndi) {
+  constexpr int BN = 64;        // v4.1 measured non-fused geometry
+  constexpr int KG = BN / 8;    // K row groups of 8
+  constexpr int VP = BN / 2;    // V row pairs
+  constexpr int DCHUNKS = 8;
+  constexpr int WG = 32;
+  const int gid = static_cast<int>(ndi.get_group_linear_id());
+  const int lid = static_cast<int>(ndi.get_local_linear_id());
+  const int nTiles = (static_cast<int>(kvLen) + BN - 1) / BN;
+  const int headIdx = gid / nTiles;
+  const int tile = gid % nTiles;
+  const int kvBase = tile * BN;
+  const size_t tileKOff =
+      (static_cast<size_t>(headIdx) * nTiles + tile) * BN * 64;
+  const size_t tileVOff =
+      (static_cast<size_t>(headIdx) * nTiles + tile) * BN * 64;
+
+  // K pack: thread -> (kvGroup = lid/4, dChunks = (lid%4)*2, +1).
+#pragma unroll
+  for (int g = lid / 4; g < KG; g += WG / 4) {
+    const int c0 = (lid % 4) * 2;
+#pragma unroll
+    for (int cc = 0; cc < 2; cc++) {
+      const int c = c0 + cc;
+      simd<ElemT, 128> rows = 0;
+#pragma unroll
+      for (int r = 0; r < 8; r++) {
+        const int row = kvBase + g * 8 + r;
+        simd<ElemT, 16> chunk = 0;
+        if (row < static_cast<int>(kvLen)) {
+          chunk = block_load<ElemT, 16>(
+              reinterpret_cast<const ElemT*>(kState) +
+                  static_cast<size_t>(row) * headKv * 128 +
+                  static_cast<size_t>(headIdx) * 128 + c * 16,
+              overaligned_tag<16>{});
+        }
+        rows.template select<16, 1>(r * 16) = chunk;
+      }
+      simd<uint32_t, 64> words;
+#pragma unroll
+      for (int dp = 0; dp < 8; dp++) {
+#pragma unroll
+        for (int r = 0; r < 8; r++) {
+          const ElemT loVal = static_cast<ElemT>(rows[r * 16 + 2 * dp]);
+          const ElemT hiVal = static_cast<ElemT>(rows[r * 16 + 2 * dp + 1]);
+          const uint32_t lo =
+              static_cast<uint32_t>(sycl::bit_cast<uint16_t>(loVal));
+          const uint32_t hi =
+              static_cast<uint32_t>(sycl::bit_cast<uint16_t>(hiVal));
+          words[dp * 8 + r] = lo | (hi << 16);
+        }
+      }
+      block_store<uint32_t, 64>(
+          reinterpret_cast<uint32_t*>(packedK) + tileKOff +
+              (g * DCHUNKS + c) * 64,
+          words,
+          overaligned_tag<16>{});
+    }
+  }
+
+  // V pack: thread = row pair; pair/8 selects the 256 B block, h selects
+  // the half within it, (pair%8)*8 is the u32 word offset.
+#pragma unroll
+  for (int pair = lid; pair < VP; pair += WG) {
+    const int row0 = kvBase + pair * 2;
+    const int row1 = row0 + 1;
+#pragma unroll
+    for (int c = 0; c < DCHUNKS; c++) {
+      simd<ElemT, 16> lo = 0;
+      simd<ElemT, 16> hi = 0;
+      if (row0 < static_cast<int>(kvLen)) {
+        lo = block_load<ElemT, 16>(
+            reinterpret_cast<const ElemT*>(vState) +
+                static_cast<size_t>(row0) * headKv * 128 +
+                static_cast<size_t>(headIdx) * 128 + c * 16,
+            overaligned_tag<16>{});
+      }
+      if (row1 < static_cast<int>(kvLen)) {
+        hi = block_load<ElemT, 16>(
+            reinterpret_cast<const ElemT*>(vState) +
+                static_cast<size_t>(row1) * headKv * 128 +
+                static_cast<size_t>(headIdx) * 128 + c * 16,
+            overaligned_tag<16>{});
+      }
+#pragma unroll
+      for (int h = 0; h < 2; h++) {
+        simd<ElemT, 16> loHalf = 0;
+        simd<ElemT, 16> hiHalf = 0;
+        for (int i = 0; i < 8; i++) {
+          loHalf[i] = lo[8 * h + i];
+          hiHalf[i] = hi[8 * h + i];
+        }
+        simd<uint32_t, 8> w;
+#pragma unroll
+        for (int i = 0; i < 8; i++) {
+          const uint32_t a =
+              static_cast<uint32_t>(sycl::bit_cast<uint16_t>(
+                  static_cast<ElemT>(loHalf[i])));
+          const uint32_t b =
+              static_cast<uint32_t>(sycl::bit_cast<uint16_t>(
+                  static_cast<ElemT>(hiHalf[i])));
+          w[i] = a | (b << 16);
+        }
+        block_store<uint32_t, 8>(
+            reinterpret_cast<uint32_t*>(packedV) + tileVOff +
+                ((pair / 8) * DCHUNKS + c) * 2 * 64 + h * 64 +
+                (pair % 8) * 8,
+            w,
+            overaligned_tag<16>{});
+      }
+    }
+  }
+}
+```
+
+The v3 variant used `BN=128` (full 64 KB SLM budget, flags loaded from
+global); v4.1 measured the two-kernel path at `BN=64`. Reading packedV
+directly from global instead of staging it through SLM measured 172 ms vs
+105 ms at `BN=64`; keep the SLM staging.
+
+### Stable Online-Softmax Rescale Core
+
+Never exponentiate a positive difference. If the new tile raises the row
+max, scale the previous accumulator/l by `exp2((oldM - mTile) * log2e)`;
+if it lowers the max, scale the current tile by `exp2((mTile - oldM) *
+log2e)`. Every rescale is `<= 1`, so large score spans cannot overflow fp32.
+
+```cpp
+constexpr float LOG2E = 1.4426950408889634f;
+const float oldM = mArr[r];
+float rescalePrev = 1.0f;
+float rescaleCur = 1.0f;
+if (mTile > oldM) {
+  rescalePrev = std::exp2((oldM - mTile) * LOG2E);  // scale previous acc/l
+} else if (mTile < oldM) {
+  rescaleCur = std::exp2((mTile - oldM) * LOG2E);   // scale current tile
+}
+lArr[r] = lArr[r] * rescalePrev + lTile * rescaleCur;
+mArr[r] = std::max(mTile, oldM);
+acc = acc * rescalePrev;
+```
+
+The measured kernel used the ESIMD vector form
+`__ESIMD_NS::exp2<float, N>(...)` and stored `p` as `p16 * rescaleCur` before
+the SxV stage. The old form `exp2((m_old - m_new) * log2e)` overflowed to
+inf/NaN and produced black video frames at H3-scale score spans; the stable
+form passed the q/k x10, v x10 stress test with no 65504 saturation.
+
+### Host-Side SDP Dispatch and Packed-Buffer LRU Core
+
+Measured host-side contract for the v4.1 sidecar: fused when `qLen <= 1024`
+AND `qTilesFused * kvTilesFused <= 128`; otherwise pack Q/K/V once and run
+the non-fused attention kernel. Cache identity must include both head
+counts, and eviction must not free USM an async kernel may still read.
+
+```cpp
+constexpr int FUSED_RPT = 4;       // measured stable fused geometry
+constexpr int RPT = 8;             // measured non-fused geometry
+constexpr int FUSED_MAX_Q = 1024;  // measured dispatch threshold
+constexpr int FUSED_MAX_TILES = 128;
+constexpr size_t CACHE_MAX_SHAPES = 1;  // 2 also measured; 1 after VRAM audit
+
+struct V4Buffers {
+  void* packedQ = nullptr;
+  void* packedK = nullptr;
+  void* packedV = nullptr;
+};
+
+// packQ depends on headQ/qLen; packK/packV sizes depend on headKv/kvLen.
+// A GQA head-count change must not alias differently-sized buffers.
+const uint64_t key =
+    (static_cast<uint64_t>(headQ) << 48) |
+    (static_cast<uint64_t>(headKv) << 40) |
+    (static_cast<uint64_t>(static_cast<uint32_t>(qLen)) << 16) |
+    static_cast<uint32_t>(kvLen);
+
+const int qTilesFused =
+    (qLen + 32 * FUSED_RPT - 1) / (32 * FUSED_RPT);
+const int kvTilesFused = (kvLen + 63) / 64;
+const bool useFused = qLen <= FUSED_MAX_Q &&
+                      qTilesFused * kvTilesFused <= FUSED_MAX_TILES;
+
+// Eviction path: never free USM that an earlier async submission may read.
+queue.wait();
+sycl::free(victim.packedQ, queue);
+sycl::free(victim.packedK, queue);
+sycl::free(victim.packedV, queue);
+```
+
+One H3 shape at `seq ~= 20685` holds about 0.9 GB of packed buffers; an
+unbounded cache compounded ComfyUI VRAM pressure and made a second workflow
+run slower. `queue.wait()` is only needed on eviction/clear, not per call;
+release builds used async dispatch with the caller's torch stream as the
+synchronization point.
+
+### Sidecar Glob Cache Core (Python)
+
+The Python wrapper's sidecar discovery glob measured about 0.5 ms per call;
+scan once and cache the result.
+
+```python
+_sidecar_cached = None
+
+def sidecar_candidates_cached():
+    global _sidecar_cached
+    if _sidecar_cached is None:
+        _sidecar_cached = sidecar_candidates()
+    return _sidecar_cached
+```
 
 ## Conv Cacheblock Core
 
