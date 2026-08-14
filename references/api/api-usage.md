@@ -235,14 +235,16 @@ Pass the packed weights buffer as `[N, K/2]` bytes, low nibble first along K. Pa
 SYCL `dpas` cannot run this mixed f16/u4 shape directly. The stable SYCL fallback is host-dequantized u4 -> bf16 followed by the bf16 ESIMD DPAS kernel; that lands at 0.060 to 0.061 ms versus oneDNN's 0.033 to 0.034 ms.
 
 oneDNN 3.11.2 rejects the u4 primitive descriptor when `fpmath_mode` is left
-unset; use `strict` or `any` with `apply_to_int=true`. For the M=64
-weight-only decode GEMV, f16 src is the accuracy-matched path and bf16 src
-selects `jit:gemm:any` but fails the required tolerance.
+unset; use `strict` or `any` with `apply_to_int=true`.
 
-The `0.033 to 0.034 ms` number is the bf16-src fastest-only path
-(`comparable_for_speedup=false`); do not use it for a speedup ratio. The
-accuracy-matched f16-src baseline is about `0.158 ms` at
-`64x4096x4096, gs=128`.
+The `0.033 to 0.034 ms` number above is the f16-src `jit:gemm:any` baseline
+for this `1024x1536x512` GEMM (`errors: 0/1572864`; see
+[techniques.md](../techniques/techniques.md)). Do not confuse it with the M=64
+weight-only decode GEMV-M1: there, f16 src is the accuracy-matched path
+(about `0.158 ms` at `64x4096x4096, gs=128`), while bf16 src selects
+`jit:gemm:any` but fails the required tolerance, so it is `fastest_only`
+(`comparable_for_speedup=false`) and must not be used for a speedup ratio.
+See [weight-only-gemv.md](../weight-only-gemv.md).
 
 ## Build and Run Commands
 

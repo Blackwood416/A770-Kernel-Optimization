@@ -91,10 +91,19 @@ L2-resident tiles. Full tables:
 
 | Operation | FLOP/B | Achieved | Class |
 |---|---:|---|---|
-| bf16 GEMM 1024x1536x512 | 180.7 | 26.2 TFLOPS | compute-bound |
+| bf16 GEMM 1024x1536x512 | 180.7 | 26.2 TFLOPS | memory-bound by the DRAM ridge; see note |
 | f32 GEMV 4096x4096 | 0.5 | 312 GB/s | memory-bound |
 | f32 RMSNorm 1024x4096 | 0.5 | 342 GB/s | memory-bound |
 | f32 Softmax 1024x4096 | 0.6 | 314 GB/s | memory-bound |
+
+Class is judged against the current empirical ridges, not the superseded
+`94.7 FLOP/B` ridge. The bf16 GEMM row (`180.7 FLOP/B`) is below the DRAM
+ridge (`345.7 FLOP/B`) and above the L2 ridge (`117.7 FLOP/B`), so it is
+memory-bound by the DRAM pattern; but its achieved bandwidth is about
+`145 GB/s` (`26.2 TFLOPS / 180.7`), roughly half of `B_DRAM_contiguous`
+(`291.1 GB/s`), so the practical limit is instruction/issue rate rather than
+the bandwidth ceiling. The historical "compute-bound" label came from the old
+ridge and does not transfer to the current constants.
 
 ## Rules
 

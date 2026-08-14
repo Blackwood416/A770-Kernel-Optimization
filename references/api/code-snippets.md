@@ -630,7 +630,12 @@ if constexpr (Plain) {
 
 Source pattern: `gemv.cpp`.
 
-Measured 0.215 ms for `y = A*x`, `4096x4096`, row-major f32 A on A770; the same-operation baselines were oneMKL GPU gemv 0.329 ms and oneDNN GPU matmul `Kx1` 0.380 ms. Keep the per-lane trip count dynamic because the compiler may select 32-lane sub-groups.
+Measured 0.215 ms for `y = A*x`, `4096x4096`, row-major f32 A on A770.
+Same-operation library baselines with the unified protocol (device-time
+median): oneMKL GPU gemv `transpose::trans` 0.166 ms, oneDNN GPU matmul `Kx1`
+`jit:gemm:any` 0.456 ms; the older 0.329 / 0.380 ms wall-time numbers are
+superseded. Keep the per-lane trip count dynamic because the compiler may
+select 32-lane sub-groups.
 
 ```cpp
 constexpr size_t SUB = 16;       // local dimension 0

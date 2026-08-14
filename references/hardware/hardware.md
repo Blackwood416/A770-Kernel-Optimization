@@ -45,7 +45,7 @@
 
 - GEMV is memory-bound on A770: 64 MB of A plus a 16 KB x vector per launch. x fits in L2 and L1, so a cooperative SLM relay of x was slightly negative (0.229 ms vs 0.215 ms for direct L2 reads).
 - Best measured standard-SYCL structure: 2D `nd_range`, one row per sub-group, `vec<float,16>` loads, per-lane trip count derived from the actual sub-group size, scalar `reduce_over_group`, 512-thread work-groups. Stable at about 0.215 ms.
-- Same-operation library baselines on the same machine: oneMKL GPU gemv 0.329 ms, oneDNN GPU matmul `Kx1` 0.380 ms. oneDNN `1xK` at 0.182 ms is `x*A` (`A^T*x`), not row-major `A*x`, and its output did not match the reference.
+- Same-operation library baselines on the same machine, device-time median with the unified protocol: oneMKL GPU gemv `transpose::trans` 0.166 ms, oneDNN GPU matmul `Kx1` `jit:gemm:any` 0.456 ms. The older 0.329 / 0.380 ms numbers were wall-time based and are superseded; see the ladder in [techniques.md](../techniques/techniques.md) for the full table. oneDNN `1xK` at 0.182 ms is `x*A` (`A^T*x`), not row-major `A*x`, and its output did not match the reference.
 - VTune instruction-count mix for the 0.215 ms kernel: about 3.9M instructions/kernel, Int32/SP Float 61%, Other 18.8%, Send 13.7%, Control Flow 4.5%, Synchronization 1.7%, SIMD utilization 96.9%. The remaining cost is vector FMA plus reduction, not global bandwidth or address math.
 
 ## Occupancy Math and Measured Sweet Spots
