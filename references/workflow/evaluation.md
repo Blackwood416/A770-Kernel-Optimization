@@ -2,7 +2,7 @@
 
 > `[MEASURED]` evaluation-session observations, not GPU kernel numbers.
 > Validity domain: task set `task-01..task-05`, skill
-> `$optimize-a770-kernels`, subject = five independent `codex exec`
+> `$A770-Kernel-Optimization`, subject = five independent `codex exec`
 > processes (CLI 0.146.0, model deepseek-v4-flash, prompts v2 inline-only),
 > run date 2026-08-09; confidence = single session, one model/CLI
 > combination.
@@ -115,8 +115,13 @@ skill revision.
 | 9 | medium | `SKILL.md` codegen branch | Split `[MEASURED]` auto-vectorization from `[HEURISTIC]` unroll advice |
 | 10 | medium | `attention-decode.md` decision rules | Added explicit GQA wall/device champion example |
 | 11 | high | `SKILL.md` Curated Pitfalls | Split `[ARCH]` PVC-only availability from version-specific `[BUG]`/`[TOOLCHAIN]` hang/JIT-rejection |
-| 12 | high | `api-usage.md` oneDNN fallback | Labeled `0.033-0.034 ms` as bf16-src fastest-only and added the matched f16-src baseline |
+| 12 | high | `api-usage.md` oneDNN fallback | Labeled `0.033-0.034 ms` as bf16-src fastest-only and added the matched f16-src baseline (reverted 2026-08-13, see row 15) |
 | 13 | high | `SKILL.md` Row reductions | Added wall/device champion clarification for "fastest RMSNorm" |
+| 14 | high | `hardware.md` / `code-snippets.md` GEMV baselines | Replaced the wall-time 0.329 / 0.380 ms numbers with device-time medians (oneMKL 0.166 ms, oneDNN 0.456 ms) and marked the older values superseded |
+| 15 | high | `api-usage.md` u4 INT4 note | Reverted the bf16-src fastest-only mislabel on the f16-src `1024x1536x512` GEMM baseline (fix 12 was applied to the wrong operator); scoped the `0.158 ms` matched baseline to the M=64 weight-only GEMV-M1, where bf16 src is `fastest_only` |
+| 16 | high | `bandwidth.md` roofline classification | Reclassified the bf16 GEMM row against the current 345.7 / 117.7 FLOP/B ridges and noted its achieved ~145 GB/s versus `B_DRAM_contiguous` (291.1 GB/s) |
+| 17 | medium | `evaluation.md` reproduction | Marked the `eval\` commands as evaluation-checkout reproduction context, not skill-root commands |
+| 18 | medium | link integrity | Added `scripts/tests/test_links.py` validating every relative markdown link and GitHub-style heading anchor (`python -m unittest discover -s scripts/tests -p "test_*.py"`) |
 
 ## Second Review Fixes (2026-08-09)
 
@@ -144,6 +149,12 @@ skill revision.
 | Workflow scope | Added `methodology.md` for new-operator thinking, profiling-driven next experiments, and failure-model updates; harness marked optional thin helper |
 
 ## Reproduction
+
+The scorer and task sets are not bundled in this skill; they live in the
+evaluation checkout that produced this page, exactly like the campaign
+runners for the measured pages. The commands below are reproduction context
+for that checkout, not skill-root commands: do not run `eval\...` from the
+skill root.
 
 ```powershell
 python eval\scoring.py --date 2026-08-09 --subject "independent run"
