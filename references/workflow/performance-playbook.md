@@ -37,6 +37,16 @@ and gives the action plus the expected effect. Numbers are from `bench/records/`
 | A GEMM is a wave or more behind and the tile/SLM/barrier knobs are already spent | the same 'which addresses are in flight together' quantity exists one level up: the work-group -> (m-band, n-band) map decides which tiles share a wave and therefore which rows/columns are concurrent. It pays **only** as a conjunction: more than one wave **and** a wide n-band (`GRID_N >= 11`); a wide band alone buys nothing, `GRID_N` alone buys nothing, one wave buys nothing (`docs/77`-`docs/81`) | set `GEMM_SWIZZLE` to a grouped map (`band = gid/(SWZ*GRID_N)`, `bm = band*SWZ + rem%SWZ`, `bn = rem/SWZ`) with SWZ dividing `GRID_M`, and check the wave count and band width first - if the grid fits in one wave, skip it entirely | `docs/81`: at 48 groups / 2 waves / tail 16 / identical 15.73 MB, band 12 gives +2.11 % / +3.28 % while band 8 gives +0.17 % / +0.36 %; `docs/79`: band 11-12 wins, 8-10 silent; `docs/80`: single-wave cells (32, 32 and 24 groups) are all within noise; `docs/81` F (72 groups, 3 waves, band 12) wins in both passes, so it is not a two-wave artefact |
 | You measured a memory-order win and want to promise it to another operator | a pure-read microbenchmark with the total bytes held constant is the cheap test of whether the win is a streaming-bandwidth property at all - and here it **did not** reproduce an 18.75 % kernel win (`docs/75`) | run the microbenchmark before generalising; if it does not reproduce, the remaining candidates are the ones it cannot model - per-lane load width (kernel 8 B vs probe 16 B), per-thread outstanding depth, L2 interaction across the kernel's concurrent heads, and the issue rhythm between loads - and every one of them needs the real kernel, not a proxy | `docs/75`: 19 cells x 2 runs, stream-count axis flat to `<=0.62 %` per spacing, the only visible axis is 1.70 % and runs *opposite* to the kernel, link-back verdict `not-reproduced` (kernel +18.75 % vs probe -1.53 %); the same probe is the reason the DRAM byte counter is not quotable (21-23 % of true traffic) |
 
+
+**Shipping the rule is a separate decision from proving it (P10).** After the rule transfers to a second
+tile, the question "turn it on by default?" gets answered by the kernel's own shipped shape, not by the
+sweep: here that shape was the quiet cell of the sweep, so the default went to the grouped map with the
+adoption stated as *neutral where we run, pays where the grid is wide enough* — plus the condition
+converted into the user's units (`N >= win_min x tile BN`) so a deployment below it is told it gets
+nothing. Two traps: (1) an adoption page that quotes the sweep's best cell as if it were the shipped
+shape is lying by juxtaposition, and (2) the revert path has to be written down as the sanctioned outcome
+*before* it is needed, and asserted in the artifact script, or a future regression has no agreed response.
+
 ### Swizzling a GEMM's work-group -> tile map (P9, `docs/77`-`docs/81`)
 
 The rule is a **conjunction**, and both halves were measured separately: `GEMM_SWIZZLE=2` pays only when the grid

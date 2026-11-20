@@ -20,6 +20,20 @@ are named with the artifact that carries the numbers, because the incident is th
 | Prove "no typed numbers" by perturbing the artifacts, and account for every field that does not move | a plausible-looking claim of interpolation that nobody checked | a page claimed every number was derived; a harness of 383 single-value perturbations moved 208 of them, and all 169 non-movers were then individually classified as: a field the generator never reads, a value outside the printed `max()`/range selection (perturbing roof 403.1 → 400.0 does not move a printed maximum), or a change below the printed precision |
 | Make an acceptance criterion an executable predicate, not a sentence | a task closed on "the doc exists" or on a threshold a human interpreted | a check written with POSIX single quotes passed under bash and went RED in the gate, because the runner is `cmd.exe` and `'0.70'` arrived as a literal token; and a doc-shape predicate with a minimum line count plus required markers is what stops a one-line summary being accepted as a write-up |
 
+- **An artifact may not read a constant from the current world.** A measurement record that derives a
+  parameter from the live source tree is a cache, not a record: it silently re-states itself whenever the
+  source moves. This cost a full round here — two probes derived "the default swizzle factor" by re-reading
+  `#define GEMM_SWIZZLE` from the kernel, which was harmless while the default never changed, and then
+  rewrote both frozen artifacts (and three generated pages) the moment it did. Freeze the value the probe
+  MEASURED, with the commit it was measured at, and make a missing declaration a hard refusal — never a
+  fallback to the live tree, because the fallback is what hides the defect. Same family as "a predecessor
+  figure comes from the predecessor's own artifact", one level down: the predecessor's constants too.
+
+- **Sample the worktree twice.** A verification pass that only checks for a clean tree *before* running its
+  checks cannot see a check that writes to that tree: it reports all-green and leaves the repository
+  changed, which is how the defect above stayed invisible across many closeouts. Re-sample after the run
+  and fail if the run itself dirtied anything.
+
 ## Corollaries that came up twice or more
 
 - **A generator that scans its own inputs must exclude itself.** The probe index listed the probes
