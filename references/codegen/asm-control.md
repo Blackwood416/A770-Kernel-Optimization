@@ -46,7 +46,7 @@ genrun.exe dump_edit\edited.bin ...                # 4. run it — no recompile 
    event, ~300 s of spinning); recovery is kill-the-process plus
    `pnputil /restart-device`. Straight-line repetition is safe — a body duplicated up to 2048
    instructions (~32 KB of code) runs fine.
-2. **Always run under a watchdog** (`scripts/run_variant.ps1`: hard timeout, task-kill of the
+2. **Always run under a watchdog** (a campaign script: hard timeout, task-kill of the
    process tree, optional device restart). A missing bench line means "not measured", never "0 µs".
 3. **Compatibility is per driver.** Conclusions about encodings transfer, but a binary must always
    descend from the runtime driver's own zebin; an ocloc-compiled binary will be recompiled away.

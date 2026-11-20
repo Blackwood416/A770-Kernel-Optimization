@@ -1,10 +1,12 @@
 # Reusable Experiment Harness
 
-The core A770 measurement scripts are bundled under `scripts/` in this skill,
-with minimal example kernels under `examples/`. All commands below are
-relative to the skill root. If a deployment strips the scripts, verify script
-existence before invoking them; in that case this page is an interface
-contract only and no command may be reported as executed.
+The harness described here now lives in the **research repo**, not in this skill: the scripts are
+under `tools/harness/` at the research repo root (`Arc-ISA-Research`) and the kernels they build are in that repo's `bench/`.
+This page is therefore an **interface contract** - it states what each step must do and what its
+record must contain. Commands below are written as `tools/harness/<script>`; if the repo is not
+present, no command on this page may be reported as executed. The code was moved out of the skill
+after the skill's `examples/` copy of a kernel fell behind the repo's (a stale "copy-ready" core)
+and after pages here began citing research scripts that were never part of the skill tree.
 
 These helpers are intentionally thin and optional. They are not a mandatory
 evidence pipeline: a campaign can use a simple script or manual record when

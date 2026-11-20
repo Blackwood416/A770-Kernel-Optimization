@@ -365,7 +365,7 @@ Details and the full safety checklist are in
 
 ## Automation and Experiment Records
 
-The bundled harness under `scripts/` provides environment probe, build,
+The campaign harness under `tools/harness/` in the research repo provides environment probe, build,
 correctness compare, unified benchmark, oneDNN baseline probe, VTune parse,
 watchdog, and `record_experiment.py` with the unified JSON schema:
 

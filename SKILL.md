@@ -146,7 +146,8 @@ ESIMD shape, follow [robustness.md](references/workflow/robustness.md) and run
 one GPU pressure target at a time.
 
 Keep the workflow light. The goal is evidence discipline, not an elaborate
-per-experiment schema. The helpers under `scripts/` are optional, not a
+per-experiment schema. The helpers live in `tools/harness/` of the research repo, not in this
+skill, and are optional, not a
 mandatory pipeline. Verify a helper exists before claiming it was executed.
 
 ### Timing Contract
@@ -218,7 +219,7 @@ be emitted as `[MEASURED]`.
 |---|---|
 | [API usage](references/api/api-usage.md) | API forms, build/profile commands, oneMKL/oneDNN baselines, graph/dual-queue submission, IR dump, and watchdog usage |
 | [Code snippets](references/api/code-snippets.md) | Copy-ready building blocks for the measured campaigns |
-| [Automation helpers](references/workflow/automation.md) | Optional benchmark, correctness, baseline, VTune, watchdog, and record helpers already present under `scripts/` |
+| [Automation helpers](references/workflow/automation.md) | Optional benchmark, correctness, baseline, VTune, watchdog, and record helpers, which live in `tools/harness/` of the research repo |
 | [Reference index](references/index.md) | Complete topic and campaign map |
 | [Performance playbook](references/workflow/performance-playbook.md) | Symptom -> ISA fact -> action -> expected effect, plus the four operators' current numbers and dead ends |
 | [Methodology](references/workflow/methodology.md) | New-operator thinking, profiling-driven next experiments, and model updates after failures |

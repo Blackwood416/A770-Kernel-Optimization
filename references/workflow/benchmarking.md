@@ -1,7 +1,7 @@
 # Microbenchmarking GEN Assembly on A770 (method)
 
 **Scope**: Intel Arc A770 (DG2), driver IGC `32.0.101.9150`, OpenCL host `tools/genrun`,
-watchdog `scripts/run_variant.ps1`. This page is about how to make an instruction-level
+watchdog (a campaign script). This page is about how to make an instruction-level
 measurement trustworthy, not about any single instruction.
 
 ## 1. Amplify device time with straight-line code
@@ -18,7 +18,7 @@ runs normally and stays linear in instruction count, so amplification is a valid
 as it is **straight-line**. A hand-injected backward branch with a predicate hangs the GPU instead
 (no TDR event); see `workflow/robustness.md`.
 
-Tool: `scripts/inject_repeat.py --dump <dir> --out <dir> --match <regex> --times N --assemble`.
+Tool (research repo, `scripts/`): `inject_repeat.py --dump <dir> --out <dir> --match <regex> --times N --assemble`.
 
 ## 2. Separate timing from correctness
 

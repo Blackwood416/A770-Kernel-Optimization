@@ -121,7 +121,7 @@ skill revision.
 | 15 | high | `api-usage.md` u4 INT4 note | Reverted the bf16-src fastest-only mislabel on the f16-src `1024x1536x512` GEMM baseline (fix 12 was applied to the wrong operator); scoped the `0.158 ms` matched baseline to the M=64 weight-only GEMV-M1, where bf16 src is `fastest_only` |
 | 16 | high | `bandwidth.md` roofline classification | Reclassified the bf16 GEMM row against the current 345.7 / 117.7 FLOP/B ridges and noted its achieved ~145 GB/s versus `B_DRAM_contiguous` (291.1 GB/s) |
 | 17 | medium | `evaluation.md` reproduction | Marked the `eval\` commands as evaluation-checkout reproduction context, not skill-root commands |
-| 18 | medium | link integrity | Added `scripts/tests/test_links.py` validating every relative markdown link and GitHub-style heading anchor (`python -m unittest discover -s scripts/tests -p "test_*.py"`) |
+| 18 | medium | link integrity | Added `tools/harness/tests/test_links.py` validating every relative markdown link and GitHub-style heading anchor (`python -m unittest discover -s tools/harness/tests -p "test_*.py"`) |
 
 ## Second Review Fixes (2026-08-09)
 
@@ -130,7 +130,7 @@ skill revision.
 | Accuracy-aware baseline | Added `matched` / `relaxed_matched` / `fastest_only` / `invalid` / `unknown`, executable-reported tolerance and `semantics_id`; follow-up probe found a matched f16-src oneDNN config for weight-only M=64 |
 | RMSNorm dispatch noise | Added 3% tie handling and simplified production regions instead of per-cell argmin dispatch |
 | Evidence taxonomy | Added `[CORRECTNESS]` and `[TOOLCHAIN]`; reclassified weight-only packed-offset, M=1, and mixed-precision DPAS claims |
-| Self-contained harness | Bundled core scripts and example kernels under `scripts/` / `examples/`; added script-existence gate |
+| Self-contained harness | Core scripts and example kernels were bundled under `scripts/` / `examples/`; they now live in the research repo (`tools/harness/`, `bench/`), and this skill keeps the interface contract |
 
 ## Third Review Fixes (2026-08-09)
 
@@ -142,7 +142,7 @@ skill revision.
 | GEMV terminology | Split `GEMV-N1` (`A*x`) from `GEMV-M1` (`x*W`) |
 | Dispatch extrapolation | Interval rules stay `[HEURISTIC]` off the measured rows; boundary interpolation sweep required before promotion |
 | Tiny-kernel noise | 3% is documented as a simplification threshold; paired/interleaved measurement is required for significance |
-| Harness tests | Added `scripts/tests/test_harness.py` for tolerance mismatch, invalid/fastest_only, shape mismatch, and JSON contract parsing |
+| Harness tests | Added `tools/harness/tests/test_harness.py` for tolerance mismatch, invalid/fastest_only, shape mismatch, and JSON contract parsing |
 | Boundary dispatch | Boundary interpolation upgraded bf16 `M<=16` / `M>=24` and f32 GEMV-N1 `M<=64` / `M>=192`; unswept gaps stay `[HEURISTIC]` |
 | Campaign packaging | Intentionally not bundled: the skill is a workflow/guidance layer, not a full optimizer |
 | SkillEval scoring | Split `decision_total` / `protocol_total` / `weighted_total`; decision means are close, protocol means carry the skill delta |

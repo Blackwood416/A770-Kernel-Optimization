@@ -29,7 +29,7 @@ Receipts: `probes/022-dpas/legality.csv` (50 rows, 35 accept / 15 reject), `prob
 ## 2. Throughput and latency (measured)
 
 The measurement vehicle is an axpy kernel disassembled out of the **runtime** driver binary,
-with dpas chains injected as straight-line code (`scripts/inject_repeat.py`,
+with dpas chains injected as straight-line code (`scripts/inject_repeat.py` in the research repo,
 `probes/032-dpas/`). No control flow is introduced, so the kernel always terminates.
 
 ### 2.1 Per-instruction cost is fixed
