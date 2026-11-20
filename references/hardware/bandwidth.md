@@ -58,6 +58,33 @@ Use the pattern names
 `B_DRAM_contiguous`, `B_DRAM_strided`, `B_L2_reuse`, and `B_SLM` when choosing
 a roofline model.
 
+### Saturated float4 read/write roof (P5, 2026-11)
+
+`[MEASURED]` A float4 grid-stride kernel with enough outstanding requests measures a **higher** read
+roof than the 256 B-message campaign above, on the same card:
+
+| Kind | Configuration | GB/s (two runs) |
+|---|---|---:|
+| DRAM read | 512 MiB (32x the 16 MB L2), float4 per lane, 8 requests in flight, wg=256 | **403.1 / 400.0** |
+| DRAM write | 512 MiB store, same shape | **455.4 / 464.6** |
+| L2 read | 8 MiB resident, reps=512 | **3414.0 / 3429.8** |
+| L2 read, short kernel | 8 MiB, reps=32 (one launch ≈ 160 us) | 1650.4 / 1598.8 |
+| DRAM read, 4 in flight | 512 MiB, inflight=4 | **417.2 / 415.7** |
+
+Three things to take from this table:
+
+1. `291.1 GB/s` is a **256 B-message** contiguous-read number, not the roof of a float4 grid; the
+   gap to 403.1 is outstanding-request depth, not clocks. Say which pattern you mean — quoting 291
+   under a float4 kernel understates its bandwidth utilisation by ~38 %.
+2. **Write exceeds read** here (464.6 vs 403.1, 15 %): this is a read-latency-limited result, so do
+   not treat the read column as a hard ceiling for a store-heavy kernel.
+3. Shrinking the kernel until the launch dominates destroys the number (reps=32 gives 48 % of the
+   reps=512 rate), and more requests in flight is not automatically better — 4 beat 8 in both runs,
+   so sweep it instead of asserting it.
+
+Artifact: `probes/087-roof/work/roof.csv` in the Arc-ISA-Research repo (kernel `stream.cpp`, one
+row per kind/run with its `note` column carrying warmup/samples/inflight).
+
 ## Message Width Cost (stride 256 el = 1024 B)
 
 | Load width B | read GB/s | copy GB/s | reduce GB/s |

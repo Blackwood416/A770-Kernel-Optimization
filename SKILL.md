@@ -71,12 +71,29 @@ different operators and measurement campaigns.
 | Hardware topology, SLM/GRF/cache/XMX constraints | [hardware](references/hardware/hardware.md) |
 | Bandwidth-pattern choice and empirical roofline | [bandwidth patterns](references/hardware/bandwidth.md), [contiguous DRAM roofline](references/hardware/dram-contiguous-roofline.md) |
 | Tiny kernels, host overhead, fusion, queues, or graphs | [execution model](references/workflow/execution.md) |
+| INT2/INT4 DPAS, limited/full graph, or dynamic parameter blocks | [DG2 low-bit and graph capability](references/workflow/dg2-lowbit-graph.md) |
 | Flags, unrolling, AOT, large GRF, or IR/GEN artifacts | [codegen](references/workflow/codegen.md) |
 | New or risky ESIMD shape, hang, device-loss, or TDR risk | [robustness protocol](references/workflow/robustness.md) |
 | Known failures, correctness traps, or API gates | [pitfalls and negative results](references/workflow/pitfalls.md) |
 | API forms, builds, profiling, or library primitives | [API usage](references/api/api-usage.md) |
 | Copy-ready kernel cores | [code snippets](references/api/code-snippets.md) |
 | Optional existing benchmark/correctness helpers | [automation helpers](references/workflow/automation.md) |
+| Why a kernel behaves this way: DPAS limits, scoreboard, regions/banks, send encoding | [dpas/xmx ISA](references/isa/dpas.md) first, then [swsb](references/isa/swsb.md), [regions and banks](references/isa/regions-banks.md), [LSC messages](references/isa/lsc-messages.md), [addressing](references/isa/addressing.md) |
+| Can I even measure this on the A770? | [references/workflow/instruments.md](references/workflow/instruments.md) |
+| Given what the ISA says, what should I change? | [references/workflow/isa-to-decision.md](references/workflow/isa-to-decision.md) |
+| I have a measured symptom (stall/occupancy/drop) and need the next action | [references/workflow/performance-playbook.md](references/workflow/performance-playbook.md) |
+| Which ISA features can I actually write from source? | [references/workflow/isa-capability-matrix.md](references/workflow/isa-capability-matrix.md) |
+| Barrier/fence structure or sync cost | [sync, fences, gateway](references/isa/sync-fences.md) |
+| Shared-memory (SLM) layout, bank conflicts, padding | [SLM banks](references/hardware/slm-banks.md) |
+| Texture/sampler or typed-surface message encoding | [typed/sampler channel](references/isa/typed-sampler.md) |
+| Patching instruction bits / exec size / quarter / regions | [instruction encoding](references/codegen/encoding.md) |
+| Which compiler flag changes the generated code (or does nothing) | [compiler knobs](references/codegen/knobs.md) |
+| Hand-written or hand-edited GEN assembly on this box | [asm control loop](references/codegen/asm-control.md) |
+| Occupancy looks fine but throughput does not scale | [occupancy and XMX saturation](references/hardware/occupancy-saturation.md) |
+| Reading hardware ids (slice/EU/thread) or `sr0` | [sr0 fields](references/hardware/sr0-hwtid.md) |
+| Cache sizing, tile footprint, pointer-chasing loops | [cache geometry](references/hardware/cache-geometry.md) |
+| Cost of `math.exp`/`log`/`rsqrt` versus DPAS work | [extended math](references/isa/math-numerics.md) |
+| Instruction-level microbenchmark design or a suspiciously silent run | [benchmarking method](references/workflow/benchmarking.md) |
 | New-operator reasoning or a failed experiment | [methodology](references/workflow/methodology.md) |
 | This skill is being audited or updated | [skill evaluation](references/workflow/evaluation.md) |
 
@@ -203,6 +220,7 @@ be emitted as `[MEASURED]`.
 | [Code snippets](references/api/code-snippets.md) | Copy-ready building blocks for the measured campaigns |
 | [Automation helpers](references/workflow/automation.md) | Optional benchmark, correctness, baseline, VTune, watchdog, and record helpers already present under `scripts/` |
 | [Reference index](references/index.md) | Complete topic and campaign map |
+| [Performance playbook](references/workflow/performance-playbook.md) | Symptom -> ISA fact -> action -> expected effect, plus the four operators' current numbers and dead ends |
 | [Methodology](references/workflow/methodology.md) | New-operator thinking, profiling-driven next experiments, and model updates after failures |
 | [Skill evaluation](references/workflow/evaluation.md) | Behavior evaluation and applied text audit for maintaining this skill |
 

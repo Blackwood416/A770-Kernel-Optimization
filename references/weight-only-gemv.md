@@ -20,7 +20,7 @@ Re-measure before transferring to other GPUs, drivers, or shapes.
 ## Three Routes Compared
 
 | Route | Idea | M=64 representative |
-|---|---:|
+|---|---|---:|
 | R1 | packed load -> unpack/dequant -> FMA | 13.7-41.5 ms |
 | R2 | packed load -> device unpack -> VNNI SLM tile -> ESIMD DPAS | 2.85-5.65 ms |
 | R3 | host dequant + VNNI pack -> DPAS control | 0.25-0.65 ms |

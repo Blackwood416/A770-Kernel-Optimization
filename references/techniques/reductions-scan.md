@@ -53,6 +53,41 @@ Best measured WG size is 64. Per-work-group Sync cost grows much faster than
 the theoretical `2*log2(WG)+1`/`2*log2(WG)+3` counts because each A770 barrier
 expands into many SLM/synchronization instructions.
 
+### Sub-group reduce (`sycl::reduce_over_group`) — check the compiled width first
+
+`[MEASURED]` A 32-lane `sycl::reduce_over_group` is **not** a 32-lane reduction once IGC
+narrows the kernel. At `simd_size 16` the collective is lowered to a butterfly *per SIMD pass*
+and the cross-pass merge is simply absent (no `send.slm`, no barrier, nothing in the listing that
+could move a partial sum between passes), so each lane ends up holding the sum over its own
+16-lane half. With a 128-dim head split 4 dims per lane that silently halves the QK dot product.
+
+Diagnosis, in order (all three are needed before you believe a sub-group reduce):
+
+1. **Listing**: `ocloc disasm` of the AOT binary, or `simd.csv` columns counting `add (16|`,
+   `add (8|`, `send.slm`. A correct 32-lane tree needs a float `add (16|M0)` stage; at SIMD16 the
+   widest float stage is `(8|`.
+2. **`.ze_info`**: `simd_size: 32` for the good build, 16/8 for the narrowed ones. IGC picks the
+   width from register pressure, so *unrolling or prefetching more keys is what makes it narrow*.
+3. **Per-lane dump**: store each lane's intermediate state and fit the reduction over the
+   pre-reduction shares; the tell is `reduction_width` = 16 of 32 lanes with a fit residual at
+   rounding level (~1.6e-7), i.e. the partial products are right and only the merge is missing.
+
+Fixes, with measured prices on an A770 (bf16 decode, B=8 H=16 S=2048 D=128):
+
+- **Stage the shares through SLM and reduce explicitly** (one work-group barrier, then read all
+  32 back as `float4` and sum). Correct at any SIMD width, 557.06/557.26 us vs 1235.48/1235.63 us
+  for the slow-but-correct version, i.e. 2.22x. The single barrier is load-bearing and costs
+  35.31 us (ablation without it: 522 us but 2864 wrong values).
+- **Pin the width** with `[[intel::reqd_sub_group_size(32)]]`: correct, but 3705.63/3706.09 us =
+  6.6x the adopted build. Width can be pinned, throughput cannot be demanded.
+- Do **not** replace the collective with a hand-written `select_from_group` butterfly: on this
+  compiler it produced 14559/16384 wrong values, i.e. the lowering is not equivalent to a naive
+  lane^off tree.
+
+Rule: a sub-group reduction whose result feeds a numerical softmax must be validated by its
+*compiled* width, not by its source width — and a variant that gets faster when you unroll is a
+suspect, because the speed-up may be the missing merge.
+
 ## Selection Rules
 
 ### Reduction

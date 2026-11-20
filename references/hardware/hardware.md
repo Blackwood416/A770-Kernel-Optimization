@@ -19,14 +19,14 @@
 | GRF per thread | 128 regular / 256 large | Keep register budget with headroom; 64/128 was the 16x16 GEMM sweet spot |
 | Register width | 256 bits (32 B) | A float 8x8 accumulator is 256 B = 8 GRF |
 | Sub-group sizes | 8, 16, 32 reported by `info::device::sub_group_sizes` | The compiler can pick 32 even for a kernel written with a local dimension of 16 |
-| L1 per Xe-core | 192 KB | On-chip reuse hierarchy starts here |
+| L1 per Xe-core | 192 KB | Per-subslice figure; **a single thread keeps L1 latency out to ~1 MB** - see [cache-geometry.md](cache-geometry.md) |
 | SLM per Xe-core | 128 KB | Shared local memory pool |
 | Max SLM per work-group | 64 KB | Hard per-WG cap |
 | L2 | 16 MB | A+B working set of 2.5 MB is fully L2-resident; prefetch has nothing to hide |
 
 ## DPAS / XMX Constraints
 
-- bf16 DPAS shape on DG2: 8x8x16 (RepeatCount 8, N 8, SystolicDepth 16). PVC differs (8x16x16), so PVC tuning advice such as the official 32x64x16 register block does not transfer directly.
+- bf16 DPAS shape on DG2: M=8, N=8, K=16 (RepeatCount 8, SystolicDepth 8, two operations per channel). PVC differs (8x16x16), so PVC tuning advice such as the official 32x64x16 register block does not transfer directly.
 - `SystolicDepth` is fixed at 8 by `static_assert` in `dpas.hpp`.
 - DPAS `ExecutionSize=16` is allowed by the header but produces wrong results on A770 (78/128 errors); treat it as unsupported.
 - B operand must be VNNI-packed: two consecutive K rows are packed into one uint32 (`{B[2k][n], B[2k+1][n]}`). A stays row-major.

@@ -6,6 +6,10 @@ oneAPI 2026.1, VTune 2026.2.
 > Evidence: `[MEASURED]` pack + bf16 joint-matrix GEMM, `1024x1536x512`,
 > CPU f32 reference, 30 warmup + 200 timed iterations, 3 stable runs.
 
+For INT2/INT4 support, limited versus full graph aspects, or fixed-address
+parameter blocks, read [DG2 capability findings](dg2-lowbit-graph.md). The
+2026-09-06 worker campaign did not establish new submission latency constants.
+
 ## Environment and Task
 
 - Two-stage task: VNNI pack of B plus a joint-matrix bf16 GEMM,
