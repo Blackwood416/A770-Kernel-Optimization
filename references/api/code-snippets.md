@@ -30,6 +30,8 @@
 - A770 SDPA / flash attention cores
 - Conv cacheblock core
 - Correctness and timing harness
+- P13 ESIMD dpasw and coalesced GEMM core
+- P14 Native Level Zero runtime cores
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each
 section documents the kernel shape and constants it was measured with. They
@@ -2002,3 +2004,96 @@ void run_direct_nhwc_cacheblock(sycl::queue& q, const float* x,
 
 `OCB=64` was the measured winner (`0.1605 ms`); bare NHWC direct without the
 cache block and weight prepack was about 6x slower.
+
+## P13 ESIMD dpasw and Coalesced GEMM Core
+
+`[ISA]` `[MEASURED]` (`docs/97-gemm-closing-gap.md`, `C0343`-`C0345`,
+`bench/bf16_gemm_esimd_v2.cpp`, `bench/int8_gemm_esimd.cpp`): key building
+blocks that beat `oneDNN` on `1024x1536x512` (`bf16`: `68.30` / `66.08 us` vs
+`73.16 us`; `int8`: `64.14` / `57.31 us` vs `68.71 us`, `0/1572864` errors).
+
+```cpp
+// 1) Fused-EU bit-swapped SLM A staging + single 256 B load for esimd::xmx::dpasw<8, 8>.
+// Thread grid: WG=128 = 16 (tid_m) x 8 (tid_n). Even/odd threads (2k, 2k+1) share tid_m.
+const int tid_m = tid / 8;
+const int tid_n = tid % 8;
+// Bit-swap bits [2:1] so cooperative 64 B A writes land in [a_op0, a_op1] order for tid&1:
+const int slm_tid = (tid & ~6) | ((tid & 2) << 1) | ((tid & 4) >> 1);
+// Each k-step loads 256 B = 128 bf16 (half the 512 B needed by standard dpas):
+const uint32_t a_off = a_stage_base + tid_m * 512u + (tid & 1) * 256u;
+simd<uint32_t, 64> a_u32 = slm_block_load<uint32_t, 64>(a_off);
+auto a_half = a_u32.bit_cast_view<bf16>();
+// Accumulate 2 M-subtiles (TM=16) x 3 N-subtiles (TN=24) using dpasw<8, 8>:
+acc_m0_n0 = esimd::xmx::dpasw<8, 8, float, float, bf16, bf16>(
+    acc_m0_n0, b_vnni_n0, a_half.select<64, 1>(0));
+acc_m1_n0 = esimd::xmx::dpasw<8, 8, float, float, bf16, bf16>(
+    acc_m1_n0, b_vnni_n0, a_half.select<64, 1>(64));
+
+// 2) Full-wave int8 geometry unlocked by BK=64 (32 WGs = 1.0 wave, 8 barriers):
+// BM=256, BN=192, BK=64, TM=16, TN=24, WG=128 -> B_TASKS = (64/4)*(192/8) = 384 = 3*128,
+// double-buffered SLM = 2 * (256*64 + 64*192) = 57,344 B <= 64 KB.
+```
+
+## P14 Native Level Zero Runtime Cores
+
+`[MEASURED]` (`docs/99`-`docs/101`, `C0348`-`C0355`): copy-ready primitives for
+zero-tax dispatch (`0.484 us/edge`), true Copy Engine overlap (`91.6%-99.95%`),
+and TDR-safe `UncachedHost` doorbells (`6.00 us` 0 B RTT).
+
+### Native Regular Command List Replay with Indirect GraphControl
+
+```cpp
+// Pre-record once with AppendBarrier (NOT per-node zeEvent: 130.85 vs 248.8-295.3 us).
+// Replay dynamically updates fixed-address device GraphControl struct without rebuilding.
+ze_command_list_desc_t cl_desc{ZE_STRUCTURE_TYPE_COMMAND_LIST_DESC, nullptr, compute_ord, 0};
+ze_command_list_handle_t reg_cl = nullptr;
+zeCommandListCreate(ze_ctx, ze_dev, &cl_desc, &reg_cl);
+for (int step = 0; step < L; ++step) {
+    zeCommandListAppendLaunchKernel(reg_cl, ze_kernel, &dispatch, nullptr, 0, nullptr);
+    if (step + 1 < L) zeCommandListAppendBarrier(reg_cl, nullptr, 0, nullptr);
+}
+zeCommandListClose(reg_cl); // ~267 us for L=256; 1-replay break-even
+
+// Hot replay (~317 us total for L=256, 1.239 us/kernel, 0.484 us/edge):
+zeCommandQueueExecuteCommandLists(ze_compute_q, 1, &reg_cl, nullptr);
+zeCommandQueueSynchronize(ze_compute_q, UINT64_MAX);
+```
+
+### Explicit Ordinal 1 Main Copy Engine Overlap Core
+
+```cpp
+// Enumerate queue groups and pick the COPY-only ordinal (ordinal 1 on A770).
+// Avoids UR L0 v2 dual-SYCL overlap collapse (99.95% -> <=0%).
+uint32_t ngroups = 0;
+zeDeviceGetCommandQueueGroupProperties(ze_dev, &ngroups, nullptr);
+std::vector<ze_command_queue_group_properties_t> props(ngroups);
+for (auto& p : props) p.stype = ZE_STRUCTURE_TYPE_COMMAND_QUEUE_GROUP_PROPERTIES;
+zeDeviceGetCommandQueueGroupProperties(ze_dev, &ngroups, props.data());
+uint32_t copy_ord = 0;
+for (uint32_t i = 0; i < ngroups; ++i) {
+    if ((props[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COPY) &&
+        !(props[i].flags & ZE_COMMAND_QUEUE_GROUP_PROPERTY_FLAG_COMPUTE)) {
+        copy_ord = i;
+        break;
+    }
+}
+ze_command_queue_desc_t copy_desc{
+    ZE_STRUCTURE_TYPE_COMMAND_QUEUE_DESC, nullptr, copy_ord, 0, 0,
+    ZE_COMMAND_QUEUE_MODE_ASYNCHRONOUS, ZE_COMMAND_QUEUE_PRIORITY_NORMAL};
+ze_command_list_handle_t copy_imm = nullptr;
+zeCommandListCreateImmediate(ze_ctx, ze_dev, &copy_desc, &copy_imm);
+// Reuse static zeEventPool via zeEventHostReset (0.10-0.20 us vs 103-232 us pool create).
+zeCommandListAppendMemoryCopy(copy_imm, dst_dev, src_pinned, bytes, ev_copy_done, 0, nullptr);
+```
+
+### TDR-Calibrated UncachedHost Doorbell Allocation
+
+```cpp
+// Only BIAS_UNCACHED passes GPU-polled coherency (10/10 vs 0/10 cached/shared).
+// Calibrate max_spins against measured ~1.12 us/spin (40 ms budget -> ~35,615 spins).
+ze_host_mem_alloc_desc_t hdesc{
+    ZE_STRUCTURE_TYPE_HOST_MEM_ALLOC_DESC, nullptr,
+    ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED};
+void* doorbell = nullptr;
+zeMemAllocHost(ze_ctx, &hdesc, 64, 64, &doorbell);
+```

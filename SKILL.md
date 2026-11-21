@@ -9,16 +9,60 @@ Use this skill as a workflow and guidance layer for optimizing SYCL/ESIMD
 kernels on Intel Arc A770 (Xe-HPG/DG2). Do not treat it as a full optimizer.
 
 Use every measured value only inside the validity domain stated by its source
-page. Most core campaigns used oneAPI 2026.1 and driver `32.0.101.8724` on
-Windows. The contiguous-DRAM and paired RMSNorm pages explicitly record later
-measurements on driver `32.0.101.8860`. For any other GPU, driver, compiler,
-or library stack, transfer the methodology only and re-measure all
+page. Early core campaigns (2026-09) used oneAPI 2026.1 and driver
+`32.0.101.8724` (or `32.0.101.8860` for contiguous-DRAM and paired RMSNorm).
+The P10-P14 ISA, operator-surpassing, and Level Zero/Graph runtime campaigns
+(`docs/84`-`docs/102`, `probes/108`-`probes/126`, claims `C0321`-`C0355`) used
+Intel Arc A770 (DG2), Windows 11 25H2, oneAPI 2026.2, driver `32.0.101.9150`,
+and Level Zero SDK `1.33.1` (driver `1.17.39894+4`). For any other GPU, driver,
+compiler, or library stack, transfer the methodology only and re-measure all
 hardware-specific assumptions. Do not name a production kernel or transfer an
 A770 dispatch boundary to a non-A770 device before measuring that target;
 treat every A770 route only as a benchmark candidate there. For a non-A770
 request that asks what to ship, state that this skill cannot make that
 selection. Do not recommend either a library or custom route for production
 until it passes target-device correctness and performance measurements.
+
+## 1-Minute A770 Engineering Quick Sheet (P12-P14)
+
+Use this before opening deep reference pages (`docs/94`-`docs/102`, `C0329`-`C0355`):
+
+- **Classify the kernel into Domain I or Domain II first (`docs/94`)**:
+  - **Domain I (DRAM stream-through: GEMV, RMSNorm, Softmax, SDPA)**: `XMX=0%`,
+    `DRAM/L3` pass-through `79%-99.5%` `[MEASURED]`. Target the `403.1 GB/s`
+    float4 read roof (`probes/087-roof/work/roof.csv`) via wide `vec16` loads,
+    interleaved concurrent address streams (`SDPA_ORDER=1`), and zero register
+    spill; standard SYCL sub-group kernels suffice.
+  - **Domain II (L3-resident XMX matrix: bf16/int8 GEMM)**: `DRAM/L3` `10%-19%`,
+    L3 hit `81%-89%` `[MEASURED]`. Surpass `oneDNN` on `S1` (`1024x1536x512`)
+    with full-wave `32`-WG ESIMD tiles (`int8` needs `BK=64` to unlock `BN=192`),
+    `64 B` coalesced staging/epilogue, peeled K-loop, and fused-EU
+    `esimd::xmx::dpasw<8,8>` + bit-swapped SLM `A` (`docs/97`, `C0343`-`C0345`).
+    For wide multi-wave shapes (`S2`), note `oneDNN` natively uses Level Zero
+    `grf256` (`docs/96`, `C0341`).
+- **Runtime, Graph, Copy Engine, and Fusion rules on Windows WDDM (`docs/99`-`docs/102`)**:
+  - **Never enable `UR_LOADER_USE_LEVEL_ZERO_V2=1` globally on uncaptured dynamic
+    loops or dual-SYCL-queue Copy overlap**: uncaptured `L=256` chains slow down
+    `7.93x` vs `sycl_v1_inorder` (`1236.70 -> 9810.75 us`) and dual-SYCL
+    Compute+Copy hardware overlap collapses from `99.95%` to `<= 0%` `[MEASURED]`
+    (`docs/99`, `docs/100`).
+  - **Best zero-tax execution layer = Native Level Zero Regular Command List +
+    explicit `ordinal 1` Copy Engine**: `l0_reg_replay` hits `317.15 us` at
+    `L=256` (`1.239 us/kernel`, `0.484 us/edge` hardware gap, `1`-replay
+    break-even; use `zeCommandListAppendBarrier`, not per-node `zeEvent`), and
+    `ordinal 1` Copy Engine holds `91.6%-99.95%` Compute+Copy overlap `[MEASURED]`
+    (`docs/99`, `docs/100`).
+  - **Single-CCS `0.00%` compute concurrency**: A770 exposes `numQueues=1` on
+    `ordinal 0`; multi-queue small kernels serialize strictly in hardware
+    (`0.00%` timestamp overlap `[ARCH]` `docs/101`). Overlap small compute ops
+    only via horizontal kernel fusion.
+  - **Host-GPU doorbell & memory pools**: only `ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED`
+    passes GPU-polled coherency (`10/10`, `6.00 us` RTT = `13.0x` faster than
+    `78.00 us` event-split, `0` DMA bandwidth loss `[MEASURED]` `docs/99`,
+    `docs/101`), but calibrate spin caps against `1.12 us/spin` to avoid WDDM
+    TDR. Pre-allocate a Device Arena (avoiding UMF's `>= 16 MB` `636-1863 us`
+    cliff) and reuse a static `zeEventPool` (`zeEventHostReset` `0.10-0.20 us`
+    `[MEASURED]` `docs/101`).
 
 ## Scope Gate
 

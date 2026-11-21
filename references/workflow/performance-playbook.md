@@ -130,6 +130,18 @@ threshold scan, tail/wave separation, and third-tile invariant:
    - **`int8` S1 (`1024x1536x512`)**: zero-prepack single-kernel `int8_nopack_bk64_dpasw` (`GEMM_PREPACK=0, BK=64`) drops to **`64.14` us** (`25.11` TOPS, `-4.57` us / `-6.65%` vs in-session `oneDNN` `68.71` us baseline, `-25.58` us / `-28.51%` vs P11 `89.72` us baseline `[MEASURED]` `docs/97`); `2D` VNNI `int8_bp_bk64_dpasw` (`GEMM_PREPACK=1`) reaches **`62.61` us** (`R=1` end-to-end `73.68` us, `-16.04` us / `-17.88%` vs P11 baseline `[MEASURED]`); peak tile-packed `int8_btile_bk64_dpasw` (`GEMM_PREPACK=2`, pass `13.51` us) reaches **`57.31` us** (`28.10` TOPS, `R=1` end-to-end `70.82` us, **`-11.40` us / `-16.59%` vs in-session `oneDNN` `68.71` us baseline** and `-36.12%` vs P11 baseline `[MEASURED]` `docs/97`).
    - **GT-PIN & `0.05` ms OA closure (`docs/97`)**: `bf16_btile_dpasw` cuts per-thread `Send` from `516` (P11) / `468` (P12) / `354` (`btile_coal`) to exactly **`322` `Send`/thread** (`-37.60%` vs P11 baseline, `dpasw` saving `-32` `Send`/thread) and total instructions by `-40.79%` vs P11 baseline (`17,440,768 -> 10,326,016` `[MEASURED]`), lifting capture-calibrated L3 read bandwidth to **`218.854` GB/s** (`+40.87%` vs P11 baseline) and calibrated `XMX active(%)` to **`14.32%`** (`+44.94%` vs P11 baseline `[MEASURED]`). `int8_btile_bk64_dpasw` cuts per-launch `Send` from `1,695,744` (P11) / `1,400,832` (P12) to **`729,088` `Send`/launch** (`178` `Send`/thread, **`-57.00%` vs P11 baseline**, `dpasw` saving `-16` `Send`/thread) and total instructions by **`-54.03%` vs P11 baseline** (`12,687,360 -> 5,832,704` `[MEASURED]`). On wide multi-wave `S2` (`2048x2304x512`), `s2_bf16_btile_dpasw` (`126.13` us, `-31.39%` vs P11 baseline) and `s2_int8_btile_bk64_dpasw` (`108.80` us, `-36.39%` vs P11 baseline) still trail `oneDNN`'s `grf256` `WG=32` multi-resident kernels (`102.03` us and `104.39` us `[MEASURED]` `docs/97`).
 
+### P14: Level Zero queues, Copy Engine overlap, SYCL Graph vs Regular List, and runtime pools (`docs/99`-`docs/102`, `probes/123`-`probes/126`)
+
+| Symptom (runtime/system) | Hardware / Runtime Fact | Action | Expected Effect |
+|---|---|---|---|
+| Deep small-kernel chain (`L=64..256`) regresses `7.93x` vs `sycl_v1_inorder` after enabling `UR_LOADER_USE_LEVEL_ZERO_V2=1` | UR v2 switches `in_order` queues to Immediate Command Lists, triggering per-kernel WDDM flushes (`43.75 us/edge`, `docs/100`, `C0351`) | Capture the chain into a monolithic SYCL `command_graph` or native Level Zero Regular Command List (`l0_reg_replay`) with `GraphControl` indirect params | `L=256` drops `9810.75 -> 426.75 us` (`sycl_graph_v2`) or `317.15 us` (`l0_reg_replay`, `0.484 us/edge`, `1`-replay break-even `[MEASURED]` `docs/100`) |
+| Dual-SYCL-queue Compute+Copy overlap disappears under UR v2 | UR v2 collapses `dual_sycl_v2` overlap from `99.95%` (`v1`) to `<= 0%` across `2-16 MB` (`docs/99`, `C0350`) | Explicitly bind async DMA to native Level Zero `ordinal 1` (`COPY`-only Main Copy Engine) via `zeCommandListCreateImmediate` | Restores `99.95%` (`2 MB`) / `91.6%` (`8 MB`) / `71.3%-72.1%` (`16 MB`) hardware overlap and cuts `64 KB` H2D wall latency `3.11x` vs `sycl_q` (`59.90` vs `186.45 us` `[MEASURED]` `docs/99`) |
+| Mid-chain host `memcpy` spikes subsequent submit times | Pageable D2H on compute queue closes UR v1 dynamic batch (`+80.45%`, `390.45 -> 704.55 us`, `docs/100`, `C0352`) | Move host copies to a separate copy queue with `ext_oneapi_submit_barrier()` or pinned/registered memory | Recovers `-35.72%` (`452.85 us`) without breaking dynamic batching (`[MEASURED]` `docs/100`) |
+| Splitting a token graph into many subgraphs slows replay | Each subgraph pays a fresh submission/WDDM kick (`docs/100`, `C0352`) | Keep whole-token capture monolithic (`1x256` vs `32x8`) and use `zeCommandListAppendBarrier` inside Regular Command Lists | Avoids `9.47x` (`v1`) / `5.32x` (`v2`) subgraph inflation vs monolithic graph and saves `90%-126%` over per-node `zeEvent` (`130.85` vs `248.8-295.3 us` `[MEASURED]` `docs/100`) |
+| Two small compute kernels on separate queues show no real speedup | Windows WDDM exposes `numQueues=1` on `ordinal 0` (single CCS); hardware timestamp overlap is strictly `0.00%` (`docs/101`, `C0353`) | Stop splitting small compute across queues; horizontally fuse them into one kernel | Eliminates launch gap and duplicate global reads where multi-queue cannot overlap (`[ARCH]` `[MEASURED]` `docs/101`) |
+| GPU-polled host doorbell hangs or trips Windows TDR | Cached `malloc_host`/`malloc_shared` stall `0/10`; uncached PCIe spin takes `1123.12 ns/spin` (`docs/101`, `C0354`) | Allocate doorbells with `ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED`, calibrate spin caps to `~1.12 us/spin`, and read KB payloads with parallel threads | `10/10` coherency, `6.00 us` 0 B RTT (`13.0x` vs `78.00 us` event-split), zero DMA bandwidth penalty (`[MEASURED]` `docs/99`, `docs/101`) |
+| Hot-path allocations (`>= 16 MB`) or event creation add millisecond spikes | UMF pool stops below `16 MB` (`636.7 / 1863.4 us` at `16/64 MB`, `3.7x-4.4x` slower than bare `zeMemAllocDevice`); `zeEventPoolCreate` costs `103-232 us` (`docs/101`, `C0355`) | Pre-allocate a single Device Workspace Arena and static `zeEventPool`; reuse via `zeEventHostReset` | Drops event lifecycle to `0.10-0.20 us` (`1028x-1162x` vs pool create) and eliminates allocation spikes (`[MEASURED]` `docs/101`) |
+
 ## 3. Operator-specific starting points
 
 Numbers below are pinned `bench/records/*/record.json` entries (standard protocol warmup 20 / samples 20 /
@@ -145,12 +157,7 @@ The earlier 291 GB/s figure was a *256 B-message* contiguous-read measurement, n
 and using it understated every bandwidth percentage (the same SDPA kernel is 26.8 % of 403.1, not
 37 % of 291).
 
-- **bf16 GEMM** (`docs/56`, supersedes `docs/53` for the kernel): v2 `TM=16` dual M-chain, tile `BM=256 BN=192 BK=32
-  TN=24`, WG=128, 32 work-groups, 95.11-96.00 us (pinned) vs oneDNN `jit:gemm:any` 72.22-72.81 us (1.31-1.33x
-  behind). Paired A/B against the v1 `TM=8 TN=48` build: 5/5 rounds faster, mean -2.44 us (2.5 %), i.e. below the
-  +-8 % single-run band - adopt only on paired repeats. Counters: -28.6 % operand bytes bought -4.7 % instructions
-  and -1.4 % time, XVE stalled 92.5 %, so the residual is the staging->barrier->dpas dependency chain; 64 KB SLM
-  blocks a third stage, 24-work-group variants are 6.7-9.1 % slower, and `WG>=256` still hangs (I-003).
+- **bf16 GEMM** (`docs/97`, `docs/98`, supersedes P4-P12 `95.18`/`81.39` us baselines): on `S1` (`1024x1536x512`), `BM=256 BN=192 BK=32 TN=24 TM=16 WG=128` (32 WGs) with `GEMM_COALESCE=1` + `GEMM_DPASW=1` beats in-session `oneDNN` (`73.16` us) in both zero-prepack single-kernel mode (**`68.30` us**, `1.07x` ahead of `oneDNN`) and `Btile192` prepacked mode (**`66.08` us**, `1.11x` ahead of `oneDNN`, `322` `Send`/thread, `0/1572864` errors `[MEASURED]`); `Bp` `R=1` end-to-end is `83.00` us (`< 90.0` us budget). Historical P4 baseline (`docs/56`, `95.11-96.00` us) remains preserved as the un-coalesced default macro contract; `WG>=256` still hangs (I-003).
 - **f32 GEMV** (`docs/51`): 216.30-216.56 us vs oneDNN 447.79-449.97 us (2.07-2.08x ahead), same `A*x` decomposition,
   0/4096 errors, stable across 2026.1/2026.2; the parameter matrix rejected VEC=8 for wrong results.
 - **f32 RMSNorm** (`docs/52`): 90.44-90.53 us vs oneDNN `ocl:reusable:vectorized` 112.75-112.90 us (1.24-1.25x ahead)
@@ -220,21 +227,7 @@ and using it understated every bandwidth percentage (the same SDPA kernel is 26.
   operator or a different key layout: `docs/75` shows a pure-read microbenchmark does **not**
   reproduce the 18.75 %, so a different access pattern must repeat the same-bytes A/B in the kernel
   itself, and the last 10.6 us of the adopted shape has no instrument that can attribute it.
-- **int8 GEMM** (`docs/58`): ESIMD `dpas` 8x8x32 (`SystolicDepth 8, RepeatCount 8, ES 8, K = 32`), tile
-  BM=256 BN=128 BK=32 TN=16 TM=16, 92.24/92.49 us vs oneDNN `jit:gemm:any` 68.38/68.50 us (1.35x behind),
-  both sides exact against one CPU int64 accumulation (0/1572864). int8 is **not** dpas-throughput bound: it
-  needs half the dpas of bf16 (393,216 vs 786,432) yet takes the same time, i.e. 5 % of the 82 Gdpas/s ceiling;
-  the tile rules differ from bf16 because the VNNI group is four k values (BM and BN must both be multiples of 128,
-  so 32 work-groups is unreachable - 48 was the measured best).
-  `[MEASURED]` **P6 attribution (`docs/64`, `docs/67`)**: ablations price the 24.03 us gap one term at a time —
-  the global->register->SLM feed 29.73 us, the global reload 25.36, the per-K-tile barrier 22.49, the dpas work
-  21.92 — but those four sit on one dependency chain and cannot be summed, and none of them is removable. The one
-  removable term is the **B-operand VNNI pack** (4 strided 8 B loads + 3 shifts/ors per dword): 12.43 us = 51.7 %
-  of the gap. Paying it in a separate pass works, but only if the pass is widened: at the per-tile granularity
-  (`cols=8`, 25 % of a 32 B sector per load) the pass costs 15.09 us and the end-to-end result is a 2.04 us
-  **loss**; at `cols=32` it costs 11.10 us and the GEMM drops to 78.84 us, for 89.94 us end to end (-1.95 us vs
-  91.89, still 1.32x oneDNN). So the lever is the *pass* (sector width), not the GEMM: pre-packing halves the
-  packing work and can lose the whole win in the copy that feeds it.
+- **int8 GEMM** (`docs/97`, `docs/98`, supersedes P4-P6 `docs/58`/`docs/64`/`docs/67` `92.49`/`78.84` us baselines): raising `BK=32 -> 64` unlocks full-wave `BM=256 BN=192 BK=64 TN=24 TM=16 WG=128` (`32` WGs, `8` barriers, `57,344` B SLM, `-22.2%` compulsory L3 reads vs `BK=32`), breaking the historical `BK=32` 48-WG limit (`docs/67`). Combined with `GEMM_COALESCE=1` + `GEMM_DPASW=1`, `S1` (`1024x1536x512`, `0/1572864` exact errors) beats in-session `oneDNN` (`68.71` us) in zero-prepack single-kernel mode (**`64.14` us**, `1.07x` ahead of `oneDNN`), `Bp` mode (`62.61` us, `R=1` E2E `73.68` us), and `Btile192` mode (**`57.31` us**, **`1.20x` ahead of `oneDNN`**, `178` `Send`/thread `[MEASURED]`). (Historical `docs/64`/`docs/67` ablation on `BK=32` remains valid for `cols=32` full-sector prepack design.)
 
 `[MEASURED]` **P5 latency attribution for the bf16 GEMM** (`docs/61`): the adopted tile's worst pinned median is
 95.18 us against a 90 us budget — 5.18 us short (5.8 %) — and the term that holds it there is the per-K-tile
@@ -260,4 +253,4 @@ expensive than the latency it was meant to hide.
 - Dual issue, indirect-addressing cost and join/call stack depth: still blocked on per-type issue counters and
   cycles (`docs/22`, `docs/50` §6). Record them as negatives with the required instrument, do not rebuild the
   old vehicles.
-- 256-GRF mode, bindless (B7) and L1/L2 associativity: measured as not worth retrying on this box; see `docs/22`.
+- Bindless (B7) and L1/L2 associativity: measured as not worth retrying on this box; see `docs/22`. Note that `256-GRF` mode **is** natively supported via Level Zero binary kernels (`oneDNN gemmstone` runs `grf256` with `Spill=0` on all 4 GEMM targets, `docs/96`, `C0341`), correcting `docs/32` which only probed the OpenCL `.spv` runtime recompile gate.

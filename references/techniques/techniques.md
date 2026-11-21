@@ -51,6 +51,17 @@ Every ladder row links to the embedded code that implements it in [code-snippets
 
 Steps 5-8 were measured negative on that geometry and are recorded so nobody repeats them. Steps 9-13 are the joint_matrix path; steps 14-18 are the ESIMD path that replaced it.
 
+### P13 Continuation: Surpassing oneDNN on bf16 and int8 GEMM (oneAPI 2026.2 / Driver `32.0.101.9150`, `docs/97`-`docs/98`, `C0343`-`C0345`)
+
+`[MEASURED]` On the current A770 stack (`1024x1536x512` `S1`, `0/1572864` errors, two-run conservative worst median, in-session `oneDNN 3.13.2` `jit:gemm:any` = `73.16 us` `bf16` / `68.71 us` `int8`), four structural steps beyond Step 18 beat `oneDNN` in both zero-prepack and prepacked modes:
+
+| Step | Dtype & Variant | Key Change | Conservative Median | vs In-Session oneDNN | Reference / Snippet |
+|---|---|---|---:|---:|---|
+| 19 | `bf16_nopack_dpasw` (`PREPACK=0`) | `BM=256 BN=192 BK=32 TN=24 TM=16`, `64 B` coalesced staging/epilogue, peeled K-loop, fused-EU `dpasw<8,8>` + bit-swapped SLM A | `68.30 us` (`23.58 TFLOPS`) | **`-6.64%` (`1.07x` ahead)** | [P13 ESIMD dpasw & Coalesced GEMM Core](../api/code-snippets.md#p13-esimd-dpasw-and-coalesced-gemm-core) |
+| 20 | `bf16_btile_dpasw` (`PREPACK=2`) | + `64 B`-aligned `1:1` SLM-image `Btile192` prepack (`322` `Send`/thread, `-37.60%` vs P11) | `66.08 us` (`24.37 TFLOPS`) | **`-9.68%` (`1.11x` ahead)** | `docs/97-gemm-closing-gap.md` |
+| 21 | `int8_nopack_bk64_dpasw` (`PREPACK=0`) | `BK=64` unlocks full-wave `BN=192` (`32` WGs, `8` barriers, `-22.2%` L3 reads) + `64 B` coalesced + `dpasw<8,8>` | `64.14 us` (`25.11 TOPS`) | **`-6.65%` (`1.07x` ahead)** | [P13 ESIMD dpasw & Coalesced GEMM Core](../api/code-snippets.md#p13-esimd-dpasw-and-coalesced-gemm-core) |
+| 22 | `int8_btile_bk64_dpasw` (`PREPACK=2`) | + `Btile192` (`178` `Send`/thread, `-57.00%` vs P11; `R=1` E2E `70.82 us`) | `57.31 us` (`28.10 TOPS`) | **`-16.59%` (`1.20x` ahead)** | `docs/97-gemm-closing-gap.md` |
+
 ## Why Each Step Works
 
 ### Tiling and register reuse

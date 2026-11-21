@@ -5,11 +5,13 @@ optimization loop, timing rules, and the oneDNN baseline contract. Then load
 only the operator page and cross-cutting pages that apply to the task.
 
 Treat the environment and validity domain on each reference page as
-authoritative. Most core campaigns used Intel Arc A770 (DG2), Windows 11,
-oneAPI 2026.1, and driver `32.0.101.8724`. The contiguous-DRAM and paired
-RMSNorm pages explicitly record later measurements on driver
-`32.0.101.8860`. Re-measure before transferring a conclusion to another GPU,
-driver, compiler, library build, shape, or layout.
+authoritative. Early core campaigns used Intel Arc A770 (DG2), Windows 11,
+oneAPI 2026.1, and driver `32.0.101.8724` (with `32.0.101.8860` on the
+contiguous-DRAM and paired RMSNorm pages). The P10-P14 ISA, operator-surpassing,
+and Level Zero/Graph runtime campaigns (`docs/84`-`docs/102`, claims
+`C0321`-`C0355`) used Windows 11 25H2, oneAPI 2026.2, driver `32.0.101.9150`,
+and Level Zero SDK `1.33.1` (`1.17.39894+4`). Re-measure before transferring a
+conclusion to another GPU, driver, compiler, library build, shape, or layout.
 
 ## Operator Decisions and Measured Ladders
 
@@ -37,7 +39,7 @@ driver, compiler, library build, shape, or layout.
 | Access-pattern bandwidth | [hardware/bandwidth.md](hardware/bandwidth.md) | DRAM-like, L2, SLM, message-width, stride, and empirical roofline data |
 | Contiguous DRAM constants | [hardware/dram-contiguous-roofline.md](hardware/dram-contiguous-roofline.md) | Named bandwidth patterns and validated/empirical ridges |
 | New-operator or failed-experiment reasoning | [workflow/methodology.md](workflow/methodology.md) | Operator classification, bottleneck-driven next tests, and model updates |
-| Launch, host, fusion, queue, or graph overhead | [workflow/execution.md](workflow/execution.md) | Submission-form measurements and fusion threshold |
+| Launch, host, fusion, queues, Copy Engine, UR v1/v2, or L0 graphs | [workflow/execution.md](workflow/execution.md) | P14 Level Zero topology, 5-mode PCIe/D2D bandwidth, Copy Engine overlap, 7-path submit/graph ladder, batch cliff, doorbell coherency, UMF/event pools, and hybrid fusion architecture |
 | Compiler flags and generated code | [workflow/codegen.md](workflow/codegen.md) | O2/O3, unroll, AOT, large GRF, IR artifacts, and migration checks |
 | Risky ESIMD execution | [workflow/robustness.md](workflow/robustness.md) | One-process watchdog/TDR protocol and versioned probes |
 | Known failures and traps | [workflow/pitfalls.md](workflow/pitfalls.md) | API gates, structural negatives, correctness traps, and diagnostic traps |
