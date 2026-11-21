@@ -21,6 +21,7 @@ are named with the artifact that carries the numbers, because the incident is th
 | Make an acceptance criterion an executable predicate, not a sentence | a task closed on "the doc exists" or on a threshold a human interpreted | a check written with POSIX single quotes passed under bash and went RED in the gate, because the runner is `cmd.exe` and `'0.70'` arrived as a literal token; and a doc-shape predicate with a minimum line count plus required markers is what stops a one-line summary being accepted as a write-up |
 | Enforce table column shape with one shared scanner (`G8`, `ops/table_shape.py`) | unescaped pipes inside code spans (`add (16\|M0)`) silently splitting markdown table rows into extra columns | `ops/consistency.py` G8 imports `scan` directly from `ops/table_shape.py` over `docs/*.md` instead of keeping a second copy of the rule, and `--strict` fails on any row whose cell count disagrees with its header |
 | Ratchet digits in generator-free carriers (`G9`, `ops/carrier_digits.py`) | stale numbers typed into source comments, `ops/*.py` docstrings, `README.md`, or `ops/tasks.json` board notes outside G7 | every digit run in a carrier must be a `NAME` (token with a letter, e.g. `docs/84`, `f32`, `2x2`), a `CITATION` naming an owning artifact on the same line (or paragraph for prose blocks) whose own text contains that token, or a documented `ALLOW` rule; `--strict` ratchets against `ops/carrier_digits_baseline.json` |
+| Lock falsifiable predictions in `prediction.md` before collection and report partial/full falsifications verbatim | post-hoc rationalization that hides unexpected compiler or hardware mechanisms when headlines still hold | P12 pre-registered falsifications (`probes/115`–`probes/118`, `docs/91`–`docs/94`) each caught real structural facts (`B_TASKS_PER_THREAD=1` vs `3`, extra `Synchronization` per block, `M0` co-residency `+9.42%`, intra-kernel `XVE Idle`) that a post-hoc pass would have glossed over |
 
 - **An artifact may not read a constant from the current world.** A measurement record that derives a
   parameter from the live source tree is a cache, not a record: it silently re-states itself whenever the
@@ -66,6 +67,25 @@ are named with the artifact that carries the numbers, because the incident is th
   display driver resets, and dispatches a sub-second OpenCL canary via `tools/genrun/genrun.exe`; on a hang
   or WDDM TDR it escalates through Tier-A process-tree purge (`taskkill /F /T`), Tier-B `pnputil` device
   restart, and Tier-C circuit breaker (`ops/out/gpu_circuit_breaker.json`, exit 75).
+- **Pre-registered falsifications pay for themselves when they expose hidden mechanisms (P12, `docs/91`–`docs/94`).**
+  Treating a missed pre-registered predicate as a diagnostic clue rather than a failure to hide uncovered four
+  concrete mechanisms across P12:
+  - `probes/116-sdpa-counters` `P1` (`docs/92`): expecting `Synchronization` to be invariant across `SDPA_ORDER`
+    caught IGC emitting `1` extra non-gateway `Synchronization` instruction per loop block in `SDPA_ORDER=0`
+    (`33` vs `17` on `s2048`, `9` vs `5` on `s512` `[MEASURED]`), while `P2` caught that dividing `~97%`
+    captured `>= 335` us kernels by `duty_cycle` over-reports `150` MB vs `134.2` MB theoretical (`[TOOLCHAIN]`).
+  - `probes/117-sdpa-stream-mech` `P1` (`docs/93`): predicting `M0` would match `probes/099-dram-streams`'s flat
+    band (`+/-3.0%` vs `ORDER=0` baseline) falsified that assumption on impact and proved that `WG=512` `16`-slice
+    co-residency plus `K`/`V` dual-buffer alternation already generates **`+9.42%`** (`367.3 -> 401.9` GB/s vs
+    `ORDER=0` baseline `[MEASURED]`), explaining `43.2%` of the full SDPA order win.
+  - `probes/118-operator-anatomy` `P1` (`docs/94`): predicting `int8` `GEMM_PREPACK=1` would cut `96` `Send`/thread
+    (`2.0x` `bf16`) was falsified (`-48` `Send`/thread = `1.0x` `bf16` `[MEASURED]`), exposing the exact source
+    duality: `int8` has `B_TASKS_PER_THREAD=1` (`BN=128, BK=32, WG=128`, VNNI `k4`) saving `3` loads/task, whereas
+    `bf16` S1 has `B_TASKS_PER_THREAD=3` (`BN=192, BK=32, WG=128`, VNNI `k2`) saving `1` load/task (`3*1*16 == 1*3*16 == 48` `[MEASURED]`).
+  - `probes/115-bf16-prepack` `P1`/`P2` (`docs/91`): missing the `S1` `R=1` break-even (`95.62` vs `94.27` us
+    `adopted` baseline `[MEASURED]`) and the `>= 15.0%` total-instruction threshold (`-8.31%` actual `[MEASURED]`)
+    quantified both the `GRID_M` break-even gate (`S1` `GRID_M=4` needs `R>=2` vs `S2` `GRID_M=8` wins at `R=1`)
+    and why eliminating `48` strided half-sector `Send`s cuts latency (`-13.66%`) more than instruction count (`-8.31%`).
 
 ## What to run before believing a page
 
