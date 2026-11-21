@@ -72,6 +72,40 @@ tile. Two things that round taught about how to phrase it: the axis being tested
 separation holds the **tail** fixed rather than the wave count - the 8x8 / 8x12 pair runs tail 32/32 in both
 cells and moves only the band.
 
+P10–P11 (`docs/84`–`docs/89`, `probes/108`–`113`) close the bf16 adoption, hardware-counter mechanism, direct
+threshold scan, tail/wave separation, and third-tile invariant:
+
+1. **Conditional adoption on bf16 (`docs/84`, `docs/85`, `probes/108-bf16-adoption`)**: `GEMM_SWIZZLE=2` is the
+   shipped default of `bench/bf16_gemm_esimd_v2.cpp`, pinned at 94.38/94.04 us (`bench/records/20261120-200816`,
+   `20261120-200822`) vs 94.82/95.18 us before (`20261110-001933`, `20261110-001947`, +0.84 % against a 0.38 %
+   noise floor -> `neutral` at the shipped 1024x1536 `GRID_N=8` shape `[MEASURED]`), while winning +5.10 % / +4.98 %
+   at `S2` (2048x2304, `GRID_N=12`, 3 waves `[MEASURED]`).
+2. **Hardware-counter mechanism (`docs/86`, `probes/110-gemm-swizzle-counters`)**: GT-PIN proves `Int16 & HP Float`
+   (2,949,120/launch = 240/thread), `Send` (6,340,608/launch = 516/thread), `Synchronization` (897,024/launch =
+   73/thread) and `Control Flow` (835,584/launch = 68/thread) differ by **0 instructions** between `SWZ=1` and
+   `SWZ=2` `[MEASURED]`. At 0.05 ms OA sampling, per-launch DRAM reads stay pinned to the cold `A+B` footprint
+   (`4.398` vs `4.375` MB against 4.46 MB cold, L3 hit rate 89.69 % vs 89.46 % `[MEASURED]`), falsifying cross-wave
+   DRAM re-read. Instead, `SWZ=2` pairs adjacent DSSs onto the same `bn` column (100 % adjacent-pair `B`-column
+   sharing vs 0 %, shrinking a 12-WG working set by 35.0 % from 2.621 MB to 1.704 MB), lifting resident L3 read
+   bandwidth by +4.63 % (+5.32 % capture-calibrated, 268.93 -> 281.38 GB/s `[MEASURED]`), dropping
+   `XVE Array:Stalled(%)` by 2.10 pp (57.60 % -> 55.50 % `[MEASURED]`), and raising resident `XMX active(%)` by
+   +3.88 % (+4.69 % capture-calibrated `[MEASURED]`).
+3. **Direct bf16 threshold scan, factor-4 overshoot, and tail/wave separation (`docs/87`, `docs/88`,
+   `probes/111-bf16-swizzle-scan`, `probes/112-bf16-tail-wave`)**: Scanning `GRID_N in {8, 9, 10, 11, 12}` at
+   `M=2048` (`GRID_M=8`) on the bf16 tile brackets `quiet_max=10` (`B8..B10` -0.46 %..+1.49 %) and `win_min=11`
+   (`B11` +4.33 %/+4.56 %, `B12` +5.21 %/+4.83 % `[MEASURED]`). Factor `GEMM_SWIZZLE=4` overshoots a single
+   32-DSS wave (`SWZ_BAND = 32..48 >= 32`) and trails factor 2 by 1.12..1.91 pp on every winning cell (`docs/87`
+   `[MEASURED]`). Orthogonal pairs in `docs/88` prove both partial-tail `T3` (`6x12`, 3 waves, tail 8/32:
+   +4.20 %/+4.45 %) and full-tail `T4` (`8x12`, 3 waves, tail 32/32: +5.36 %/+5.45 %) win `[MEASURED]`, while
+   under-occupied single-wave `T1` (`512x2304`, `grid 2x12 = 24` WGs < 32 DSS, 8 DSS idle) suffers a
+   **-3.11 % / -2.71 % `loss`** (`docs/88` `[MEASURED]`) — never enable `GEMM_SWIZZLE=2` when `WORK_GROUPS < 32`.
+4. **Third-tile invariant proof (`docs/89`, `probes/113-gemm-third-tile`)**: On a third tile (bf16
+   `BM=256 BN=128 BK=32 TN=16 TM=16`, SLM 49,152 B), the threshold tracks **topological column count
+   `GRID_N = N / BN >= 11`** (`K11` N=1408 +5.86 %/+5.83 %, `K12` N=1536 +7.25 %/+6.83 % `[MEASURED]`) rather
+   than physical width `N >= 2112`. The identical physical matrix `2048x1536x512` flips from `within-noise` on
+   `BN=192` (`GRID_N=8`, `W3`/`B8` +0.50 %..+1.32 %) to a steady `win` on `BN=128` (`GRID_N=12`, `K12`
+   +7.25 %/+6.83 % `[MEASURED]`).
+
 ## 3. Operator-specific starting points
 
 Numbers below are pinned `bench/records/*/record.json` entries (standard protocol warmup 20 / samples 20 /

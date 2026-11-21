@@ -17,6 +17,8 @@ index; each item names the working instrument and the fallback if it does not ex
 | In-flight window of loads/sends | SBSB token count on the emitted `send`/`load` lines | `docs/48` §3 |
 | Numeric behaviour of a flag bit | patch the prologue immediate on the runtime dump (`or cr0.0, ..., 0xNNN`) and read back `y` bits | `docs/43` |
 | GPU hardware counters (instructions, occupancy, XVE stalls) | VTune 2026.6 `gpu-hotspots` with `characterization-mode=instruction-count` or `overview`; launch the workload directly (no `cmd /c` wrapper) | `docs/50`, `probes/076-eu-metrics` |
+| Per-class GT-PIN dynamic instruction counts (CLI) | `vtune -report hotspots -r <rdir> -group-by computing-task -format csv` on a `characterization-mode=instruction-count` result (6 exhaustive classes summing to `GPU Instructions Executed` `[TOOLCHAIN]`) | `docs/86` §1.1, `probes/110-gemm-swizzle-counters/work/gtpin_ic.csv` |
+| Short-kernel (~100-200 us) OA counters without cross-launch dilution | `characterization-mode=overview -knob gpu-sampling-interval=0.05` (50 us) instead of the 1 ms default `[MEASURED]` | `docs/86` §1.2, `probes/110-gemm-swizzle-counters/work/vtune_overview.csv` |
 
 ## Does not work (do not retry without a new instrument)
 
@@ -56,3 +58,8 @@ Measured example (three runs, `docs/50`): ESIMD bf16 GEMM occupancy 31.4/32.2/33
 L3 bandwidth bound 0.7 % of peak, SIMD width 16, SIMD utilisation 100 % — the kernel is stalled/occupancy-bound, not
 DRAM-bound. The analytic "9 % occupancy" in `docs/22` (C0048) is a static GRF/SLM upper bound, a different metric; do
 not mix the two when attributing the gap to oneDNN.
+
+### Two P11 VTune/GT-PIN breakthroughs (`docs/86`, `probes/110-gemm-swizzle-counters`)
+
+- **Per-class GT-PIN dynamic instruction counts via CLI (`docs/86` §1.1, `probes/110-gemm-swizzle-counters/work/gtpin_ic.csv`)**: While `sqlite-db/dicer.db` leaves `dd_gpu_exec_instruction_info` empty (`probes/084-gtpin-types`), running `vtune -report hotspots -r <rdir> -group-by computing-task -format csv` on a `characterization-mode=instruction-count` result resolves the zebin symbols and emits exact, deterministic counts across 6 exhaustive instruction classes (`Control Flow`, `Int16 & HP Float`, `Int32 & SP Float`, `Send`, `Synchronization`, `Other`, whose sum equals `GPU Instructions Executed` `[TOOLCHAIN]`). Note: per-ordinal static-instruction mapping is still absent, so C4/D3/E3 remain blocked on per-instruction cycle counters.
+- **High-frequency OA sampling (`-knob gpu-sampling-interval=0.05` ms = 50 us) eliminates cross-launch dilution on ~100-200 us kernels (`docs/86` §1.2, `probes/110-gemm-swizzle-counters/work/vtune_overview.csv`)**: The default `gpu-sampling-interval=1` ms (1000 us) spans the host `ev.wait()` gap between synchronous batch launches, inflating `XVE Array:Idle(%)` to 86.30 % and capturing only 4.987 MB (11.32 %) of `S2_control`'s 44.04 MB compulsory L3 reads (`25.917 GB/s` reported `[MEASURED]`). Tightening `-knob gpu-sampling-interval=0.05` places ~3.86 OA samples inside each 193 us launch and recovers **42.621 MB (96.78 % capture, 95.50 % mean across 4 collections, `221.200 GB/s` raw / `268.927 GB/s` duty-cycle calibrated `[MEASURED]`)** without any external calibration multiplier.

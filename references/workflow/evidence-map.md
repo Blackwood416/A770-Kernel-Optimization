@@ -38,6 +38,11 @@ the number can be re-derived without the GPU: `python probes/<NNN>-<name>/make_d
 | Why is SDPA at 59.7% of the roof and not closer? | The cross-pass reduction barrier: 35.31 us when deleted, and deleting it is wrong (2,864 bad values) [MEASURED] | `docs/60-sdpa-fix.md` | `probes/085-sdpa-fix/` |
 | Is any unroll/prefetch setting faster? | No: nine grid points all 0 errors, best is still the adopted one [MEASURED] | `docs/65-sdpa-grid.md` | `probes/090-sdpa-grid/` |
 | Can the barrier be hidden by hoisting the next load? | No: 2.82-3.17x slower, the extra buffers spill (0/0 -> 11/5, 55/30) [MEASURED] | `docs/66-sdpa-pipeline.md` | `probes/091-sdpa-pipeline/` |
+| Why is `GEMM_SWIZZLE=2` neutral on the shipped bf16 shape yet wins on wide grids? | Shipped `1024x1536` (`GRID_N=8`, 1 wave) is `neutral` (`+0.84 %` vs 0.38 % floor, 94.38/94.04 us vs 94.82/95.18 us); `S2` (`2048x2304`, `GRID_N=12`, 3 waves) wins `+5.10 % / +4.98 %` [MEASURED] | `docs/84-bf16-adoption.md`, `docs/85-p10-summary.md` | `probes/108-bf16-adoption/`, `probes/109-p10-summary/` |
+| Why does `GEMM_SWIZZLE=2` speed up wide-grid bf16 GEMM (`S2`)? | Zero delta in GT-PIN `Int16 & HP Float`/`Send`/`Synchronization`/`Control Flow` and cold DRAM reads (`4.398` vs `4.375` MB, L3 hit 89.69 % vs 89.46 %); pairing adjacent DSSs on the same `bn` column shrinks a 12-WG working set by 35.0 % (`2.621` -> `1.704` MB), lifting resident L3 read BW `+4.63 %` (`268.93` -> `281.38 GB/s`) and cutting `XVE Stalled` `-2.10 pp` [MEASURED] | `docs/86-gemm-swizzle-counters.md` | `probes/110-gemm-swizzle-counters/` |
+| Where is the direct bf16 `band_gate`, and does factor 4 beat factor 2? | At `GRID_M=8`, factor 2 brackets `quiet_max=10` (`-0.46 %..+1.49 %`) and `win_min=11` (`+4.33 %..+5.21 %`); factor 4 overshoots one 32-DSS wave (`SWZ_BAND=32..48`) and trails factor 2 by `1.12..1.91 pp` on every winning cell [MEASURED] | `docs/87-bf16-swizzle-scan.md` | `probes/111-bf16-swizzle-scan/` |
+| Does the swizzle win depend on a full tail wave or lose under 32 WGs? | Both partial-tail `T3` (`8/32`, `+4.20 %/+4.45 %`) and full-tail `T4` (`32/32`, `+5.36 %/+5.45 %`) win at 3 waves/`GRID_N=12`, whereas single-wave under-occupied `T1` (`24` WGs < 32 DSS) loses `-3.11 % / -2.71 %` [MEASURED] | `docs/88-bf16-tail-wave.md` | `probes/112-bf16-tail-wave/` |
+| Does the swizzle gate track topological `GRID_N = N / BN` or physical `N`? | On a third tile (bf16 `BN=128`, SLM 49,152 B), `win_min=11` holds at `N=1408` (`+5.86 %/+5.83 %`) and `2048x1536x512` flips from `within-noise` (`BN=192`, `GRID_N=8`) to `win` (`BN=128`, `GRID_N=12`, `+7.25 %/+6.83 %`) [MEASURED] | `docs/89-gemm-third-tile.md` | `probes/113-gemm-third-tile/` |
 
 ## 3. Roofline denominators
 
@@ -64,6 +69,8 @@ Quote the pattern, not just the number: using 291 under a float4 kernel understa
 | AOT vs JIT codegen, large-GRF, flag effects | `probes/071-aot-vs-jit/`, `058-large-grf/` | `codegen/knobs.md` |
 | `reduce_over_group` narrowed per SIMD pass (wrong values) | `probes/085-sdpa-fix/` | `techniques/reductions-scan.md` |
 | instrument availability (what can and cannot be measured here) | `probes/084-gtpin-types/`, `076-eu-metrics/` | `workflow/instruments.md` |
+| Per-class GT-PIN dynamic counts via CLI (6 exhaustive classes) and 0.05 ms (50 us) OA sampling eliminating cross-launch dilution (`docs/86`) [TOOLCHAIN] [MEASURED] | `probes/110-gemm-swizzle-counters/` | `workflow/instruments.md` |
+| GEMM swizzle mechanism, `GRID_N >= 11` topological invariant across 3 tiles, factor-4 wave overshoot, and `WORK_GROUPS < 32` loss (`docs/84`-`docs/89`) [MEASURED] | `probes/108-bf16-adoption/`, `110-gemm-swizzle-counters/`, `111-bf16-swizzle-scan/`, `112-bf16-tail-wave/`, `113-gemm-third-tile/` | `workflow/performance-playbook.md` |
 
 ## 5. How to re-check a row
 

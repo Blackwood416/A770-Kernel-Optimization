@@ -19,6 +19,8 @@ are named with the artifact that carries the numbers, because the incident is th
 | Never type a value the renderer already holds | a page that looks interpolated and is not — the single most common audit blocker | a template that printed `{len(correct_points)} points` four lines below a paragraph that typed "9 points"; a section that printed `{acc['budget_us']:.0f}` while typing "536 us" two lines earlier; a SIMD width interpolated from a CSV in the table and typed as `SIMD8` in the prose beside it |
 | Prove "no typed numbers" by perturbing the artifacts, and account for every field that does not move | a plausible-looking claim of interpolation that nobody checked | a page claimed every number was derived; a harness of 383 single-value perturbations moved 208 of them, and all 169 non-movers were then individually classified as: a field the generator never reads, a value outside the printed `max()`/range selection (perturbing roof 403.1 → 400.0 does not move a printed maximum), or a change below the printed precision |
 | Make an acceptance criterion an executable predicate, not a sentence | a task closed on "the doc exists" or on a threshold a human interpreted | a check written with POSIX single quotes passed under bash and went RED in the gate, because the runner is `cmd.exe` and `'0.70'` arrived as a literal token; and a doc-shape predicate with a minimum line count plus required markers is what stops a one-line summary being accepted as a write-up |
+| Enforce table column shape with one shared scanner (`G8`, `ops/table_shape.py`) | unescaped pipes inside code spans (`add (16\|M0)`) silently splitting markdown table rows into extra columns | `ops/consistency.py` G8 imports `scan` directly from `ops/table_shape.py` over `docs/*.md` instead of keeping a second copy of the rule, and `--strict` fails on any row whose cell count disagrees with its header |
+| Ratchet digits in generator-free carriers (`G9`, `ops/carrier_digits.py`) | stale numbers typed into source comments, `ops/*.py` docstrings, `README.md`, or `ops/tasks.json` board notes outside G7 | every digit run in a carrier must be a `NAME` (token with a letter, e.g. `docs/84`, `f32`, `2x2`), a `CITATION` naming an owning artifact on the same line (or paragraph for prose blocks) whose own text contains that token, or a documented `ALLOW` rule; `--strict` ratchets against `ops/carrier_digits_baseline.json` |
 
 - **An artifact may not read a constant from the current world.** A measurement record that derives a
   parameter from the live source tree is a cache, not a record: it silently re-states itself whenever the
@@ -57,6 +59,13 @@ are named with the artifact that carries the numbers, because the incident is th
 - **Numbers in source comments are numbers on a page.** A kernel header comment that quoted the
   pre-re-run medians was caught by the same rule as a doc paragraph; the artifact it must quote is the
   CSV it names, worst-of-runs, and it should name the file so a reader can check.
+- **Parallel CPU build, FIFO-serialized GPU lease (`ops/gpu_lease.py`).** CPU compilation, static analysis,
+  and doc generation run concurrently across parallel workers, while all GPU measurements serialize through
+  `python ops/gpu_lease.py --owner <probe> -- cmd ...`. Before and after each lease (and on timeout or
+  abnormal exit), the broker checks A770 PnP device status (`pnputil`), scans Windows System events for
+  display driver resets, and dispatches a sub-second OpenCL canary via `tools/genrun/genrun.exe`; on a hang
+  or WDDM TDR it escalates through Tier-A process-tree purge (`taskkill /F /T`), Tier-B `pnputil` device
+  restart, and Tier-C circuit breaker (`ops/out/gpu_circuit_breaker.json`, exit 75).
 
 ## What to run before believing a page
 
