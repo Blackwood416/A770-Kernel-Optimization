@@ -86,6 +86,12 @@ are named with the artifact that carries the numbers, because the incident is th
     `adopted` baseline `[MEASURED]`) and the `>= 15.0%` total-instruction threshold (`-8.31%` actual `[MEASURED]`)
     quantified both the `GRID_M` break-even gate (`S1` `GRID_M=4` needs `R>=2` vs `S2` `GRID_M=8` wins at `R=1`)
     and why eliminating `48` strided half-sector `Send`s cuts latency (`-13.66%`) more than instruction count (`-8.31%`).
+  - `probes/121-gemm-closing-gap` `P1`/`P2`/`P3` (`docs/97`): while all `S1` clauses met and surpassed `oneDNN`
+    (`bf16` `68.30` / `66.08` us vs `73.16` us `oneDNN` baseline; `int8` `64.14` / `57.31` us vs `68.71` us `oneDNN`
+    baseline `[MEASURED]`), partial falsification on `S2` (`126.13` vs `102.03` us `bf16` `oneDNN` baseline; `108.80`
+    vs `104.39` us `int8` `oneDNN` baseline `[MEASURED]`) and the `Synchronization` count (`96` / `41` vs `33` / `17`
+    barrier-only estimate `[TOOLCHAIN]` `[MEASURED]`) exposed the single-wave (`WG=128`) vs multi-wave (`grf256`
+    `WG=32`) residency crossover and Xe-HPG SWSB scoreboard `sync.allrd`/`sync.nop` counting inside GT-PIN `Synchronization`.
 
 ## What to run before believing a page
 
