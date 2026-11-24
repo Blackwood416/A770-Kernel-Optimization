@@ -89,3 +89,12 @@ experiment neither shows nor excludes a 1-5 cycle addressing surcharge: the mode
 its *cost* is unmeasured. The loop-resident vehicle was tried in E38 and failed its controls
 (`docs/41`), so EU counters are the remaining instrument. Source:
 `docs/38-indirect-addressing.md`.
+
+## DG2 A64 no-immediate-folding, bp_vec, reverse pack_a, and non-transposed gather `[MEASURED]`
+
+Established via `ocloc disasm` and A770 ESIMD `GRF=256 dpasw` micro-architecture tuning (oneAPI 2026.2, `commit bf81332`):
+
+1. **No immediate offset folding on A64 `send.ugm`**: Calling `esimd::block_load(ptr + imm_offset)` does **not** fold `+imm_offset` into the `send.ugm` descriptor on DG2; instead IGC emits an extra **`addc` + `add3`** 64-bit arithmetic pair on every load. Pre-compute loop-invariant row/tile pointers outside the K loop and advance them with fixed scalar/vector steps (eliminating `80–90` `mul/mach/addc/shl` ops per K-step `[MEASURED]`).
+2. **Vectorized 64-bit pointer stride (`bp_vec`: `esimd::simd<uint64_t, 4>`)**: Packing 4 consecutive `B` pointers into `simd<uint64_t, 4> bp_vec` and advancing with `static_cast<uint64_t>(static_cast<uint32_t>(kBK16 * N)) * 2ULL` (cast to `uint32_t` before `uint64_t` to prevent signed 32-bit sign-extension bugs on large strides) cuts **`94` instructions from the `128x256` main loop** (`796 -> 702` ins: `addc 40 -> 16`, `add3 44 -> 16`, `mov 303 -> 270`, `sync.nop 26 -> 16`) `[MEASURED]`.
+3. **Reverse-order `pack_a` avoids dead-init `mov`**: Assigning slices of an uninitialized `simd<uint16_t, 64> ak` from top lane down (`select<16,1>(48) -> (32) -> (16) -> (0)`) prevents LLVM/IGC from inserting protective zero-initialization `mov(32)` ops, saving `5 mov` instructions `[MEASURED]`.
+4. **Negative result — Non-transposed `lsc_gather`**: Replacing contiguous `block_load` with `SIMD8 d64x4` `exp_esimd::lsc_gather` plus 2D `select` register transposition increases `mov` count (`187 -> 380`), collapses L1/bandwidth efficiency, and regresses `LMHd (128x32768x2560)` by **`-20%` vs contiguous block_load** (`406 -> 506 us` `[MEASURED]`). Keep contiguous `block_load`.

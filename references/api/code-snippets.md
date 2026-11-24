@@ -32,6 +32,7 @@
 - Correctness and timing harness
 - P13 ESIMD dpasw and coalesced GEMM core
 - P14 Native Level Zero runtime cores
+- Aurex GRF=256 production ESIMD & Tier-3 runtime cores
 
 These snippets are taken from kernels that compiled and ran on Arc A770. Each
 section documents the kernel shape and constants it was measured with. They
@@ -2096,4 +2097,150 @@ ze_host_mem_alloc_desc_t hdesc{
     ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED};
 void* doorbell = nullptr;
 zeMemAllocHost(ze_ctx, &hdesc, 64, 64, &doorbell);
+```
+
+## Aurex GRF=256 Production ESIMD & Tier-3 Runtime Cores
+
+`[MEASURED]` (`oneAPI 2026.2`, driver `32.0.101.9150`, `Aurex v0.2` `commit bf81332`): copy-ready primitives for `GRF=256` `cab4` + `split_barrier` + `0-Dummy` `dpasw<8,8>`, `-Xfinalizer` static/debug flags, DG2 cache-hint dispatch, SROA-safe SSA register naming, `4-bit` `BK=gs=64` online dequantization, and Tier-3 `.zebin` caching.
+
+### GRF=256 cab4 (48 KB) + split_barrier + 0-Dummy 2x8 + bp_vec Skeleton
+
+```cpp
+#include <sycl/ext/intel/esimd.hpp>
+#include <sycl/ext/intel/esimd/xmx/dpas.hpp>
+#include <sycl/ext/intel/experimental/esimd/memory.hpp>
+#include <sycl/ext/intel/experimental/grf_size_properties.hpp>
+
+namespace esimd = sycl::ext::intel::esimd;
+namespace exp_esimd = sycl::ext::intel::experimental::esimd;
+
+// Launch property for native 256-GRF mode with WG=32 and SLM <= 48 KB (2 WGs/Xe-core = 64/64 HW threads):
+// sycl::ext::oneapi::experimental::properties kprops{sycl::ext::intel::experimental::grf_size<256>};
+// h.parallel_for(nd_range, kprops, [=](sycl::nd_item<1> it) SYCL_ESIMD_KERNEL { ... });
+
+SYCL_ESIMD_FUNCTION inline void slm_fence_group() {
+    esimd::fence<esimd::memory_kind::local, esimd::fence_flush_op::none,
+                 esimd::fence_scope::group>();
+}
+SYCL_ESIMD_FUNCTION inline void sbar_signal() {
+    exp_esimd::split_barrier<exp_esimd::split_barrier_action::signal>();
+}
+SYCL_ESIMD_FUNCTION inline void sbar_wait() {
+    exp_esimd::split_barrier<exp_esimd::split_barrier_action::wait>();
+}
+
+// cab4 4-buffer circular SLM (4 * 12 KB = 48 KB <= 49,152 B at WG=32):
+// Step schedule (each BK=16 beat):
+//   compute_ops(r_buf) -> sbar_wait() -> slm_fence_group() -> sbar_signal()
+//   -> store_buf(w_buf) -> load_slm_ops(next_r_buf) -> load_b() -> load_a()
+// Interleaving store_buf and load_slm_ops cuts SLM ld addr chains from 45/48 to 8/48.
+
+// 0-Dummy 2x8 DPASW grouping (anchor macro dependencies to tail SLM load a23; macro cap <= 8):
+// Macro 1 (8 ops): [b0(a3)](1) -> [b1(a0..a3)](4) -> [b0(a0..a2)](3)
+acc00 = esimd::xmx::dpasw<8, 8, float>(acc00, b0, a3); // size=1 lead (b0)
+acc10 = esimd::xmx::dpasw<8, 8, float>(acc10, b1, a0); // size=4 group (b1)
+acc11 = esimd::xmx::dpasw<8, 8, float>(acc11, b1, a1);
+acc12 = esimd::xmx::dpasw<8, 8, float>(acc12, b1, a2);
+acc13 = esimd::xmx::dpasw<8, 8, float>(acc13, b1, a3);
+acc01 = esimd::xmx::dpasw<8, 8, float>(acc01, b0, a0); // size=3 group (b0)
+acc02 = esimd::xmx::dpasw<8, 8, float>(acc02, b0, a1);
+acc03 = esimd::xmx::dpasw<8, 8, float>(acc03, b0, a2);
+// Repeat symmetrically for (b2, b3): [b2(a3)](1) -> [b3(a0..a3)](4) -> [b2(a0..a2)](3)
+
+// Vectorized 64-bit B pointer stride (bp_vec) removes A64 addc/add3 bloat (-94 ins):
+esimd::simd<uint64_t, 4> bp_vec;
+const uint64_t b_k_step_bytes = static_cast<uint64_t>(static_cast<uint32_t>(16 * N)) * 2ULL;
+bp_vec += b_k_step_bytes;
+auto b_row0 = esimd::block_load<uint16_t, 64>(
+    reinterpret_cast<const uint16_t*>(static_cast<uint64_t>(bp_vec[0])), props_b);
+
+// Reverse-order pack_a prevents LLVM dead-init mov(32) (-5 mov ops):
+esimd::simd<uint16_t, 64> ak;
+ak.template select<16, 1>(48) = r3.template select<16, 1>(ah);
+ak.template select<16, 1>(32) = r2.template select<16, 1>(ah);
+ak.template select<16, 1>(16) = r1.template select<16, 1>(ah);
+ak.template select<16, 1>(0)  = r0.template select<16, 1>(ah);
+```
+
+### ESIMD VC -Xfinalizer Optimal 4-Flag CMake & Debug Env Recipe
+
+Static AOT link embedding (zero runtime env vars required):
+
+```cmake
+set(A770_XFINALIZER_OPTS
+    "-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR")
+target_compile_options(my_target PUBLIC -fsycl -O2 /Qstd=c++20)
+target_compile_options(my_target PRIVATE -fsycl-device-code-split=per_kernel)
+target_link_options(my_target PUBLIC -fsycl "SHELL:-Xs \"${A770_XFINALIZER_OPTS}\"")
+```
+
+PowerShell debug sweep without relinking (bypass persistent IGC cache):
+
+```powershell
+$env:SYCL_CACHE_PERSISTENT = "0"
+$env:SYCL_PROGRAM_APPEND_COMPILE_OPTIONS = "-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR"
+```
+
+### Cache Hint Dispatch (L1StreamB st.ca, Standard wb.wb, ResidualAdd st.uc)
+
+```cpp
+// A (shared across gid & gid+32 on 2D 8x8 N-inner snake walk): L1=cached, L2=cached
+constexpr esimd::properties props_a_ca{
+    esimd::alignment<64>,
+    esimd::cache_hint_L1<esimd::cache_hint::cached>,
+    esimd::cache_hint_L2<esimd::cache_hint::cached>};
+// B (multi-wave 2D walk, L1StreamB=true): L1=streaming, L2=cached (use ca.ca when total_wgs <= 64)
+constexpr esimd::properties props_b_st{
+    esimd::alignment<128>,
+    esimd::cache_hint_L1<esimd::cache_hint::streaming>,
+    esimd::cache_hint_L2<esimd::cache_hint::cached>};
+// C store: standard / Bias / SiLU epilogue uses wb.wb (-42 us on LMHd vs st.uc)
+constexpr esimd::properties props_c_wb{
+    esimd::alignment<64>,
+    esimd::cache_hint_L1<esimd::cache_hint::write_back>,
+    esimd::cache_hint_L2<esimd::cache_hint::write_back>};
+// C store: ResidualAdd / BiasResidualAdd epilogue uses st.uc to preserve hot residual/B in L3
+constexpr esimd::properties props_c_res_st{
+    esimd::alignment<64>,
+    esimd::cache_hint_L1<esimd::cache_hint::streaming>,
+    esimd::cache_hint_L2<esimd::cache_hint::uncached>};
+```
+
+### Named SSA Registers & 2-Way Unroll to Prevent LLVM SROA Private-Mem Spill
+
+```cpp
+// BAD: runtime index simd[cur_buf] breaks LLVM SROA -> KernelDiag reports priv=576..1088 B (2x slower).
+// BAD: vec.select<16,1>(0) = block_load(...) emits blocking mov {$dst}.
+// GOOD: independent named 1-GRF SSA registers + 2-way compile-time unroll (spill=0 B, priv=0 B):
+esimd::simd<uint16_t, 32> a0_0, a0_1, a0_2, a0_3;
+esimd::simd<uint16_t, 32> a1_0, a1_1, a1_2, a1_3;
+a0_0 = esimd::block_load<uint16_t, 32>(ap0, props_a_ca);
+// Keep non-const lvalue ref when passing into helper lambdas using .bit_cast_view<uint32_t>()
+```
+
+### 4-Bit (NF4 / INT4Sym) BK=gs=64 Zero-Branch Dequant + SLM LUT Core
+
+```cpp
+// BM=64, BN=64, BK=64, WG=32 (8x4): BK == group_size == 64 -> zero loop division/branches.
+// Stage 16-entry float codebook in SLM tail (total SLM = 32,832 B <= 48 KB -> 2 WGs/Xe-core).
+// Coalesced 4x16 B OWord load of packed uint32 weights (8 nibbles/u32), SIMD16 slm_gather LUT,
+// multiply single per-K-tile scale, convert to bf16, and store 16 B-aligned via slm_block_store<uint32_t, 4>:
+esimd::simd<uint32_t, 4> w_pk = esimd::block_load<uint32_t, 4>(w_ptr, esimd::alignment<16>);
+esimd::simd<uint32_t, 16> nibble_offsets = extract_nibbles_byte_offsets(w_pk); // * 4 bytes
+esimd::simd<float, 16> w_f32 = esimd::slm_gather<float, 16>(lut_slm_base, nibble_offsets) * tile_scale;
+esimd::simd<sycl::ext::oneapi::bfloat16, 16> w_bf16 = w_f32;
+// Offset MUST be 16 B-aligned; never use slm_block_store<uint32_t, 2> on 8 B offsets
+esimd::slm_block_store<uint32_t, 4>(slm_b_off_16b_aligned, w_bf16.template bit_cast_view<uint32_t>());
+```
+
+### Tier-3 In-Process ocloc64.dll + SHA-256 .zebin Disk Cache Loader
+
+```cpp
+// Cache key: SHA-256(opencl_src + device_id + driver_version).
+// On disk cache hit: zero JIT tax via zeModuleCreate(..., ZE_MODULE_FORMAT_NATIVE, ...).
+// On cache miss: invoke ocloc64.dll in-process with:
+//   args = {"ocloc", "-file", "kernel.cl", "-spv_only", "-device", "dg2", "-options", "-cl-std=CL2.0"}
+// Then zeModuleCreate(ctx, dev, &spv_desc /* ZE_MODULE_FORMAT_IL_SPIRV */, &mod, nullptr),
+// dump zeModuleGetNativeBinary(mod, &bin_sz, buf.data()) to <cache>/<sha256>.zebin,
+// and append ze_kernel_handle_t into the Tier-1 Regular Command List.
 ```

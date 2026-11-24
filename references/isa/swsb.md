@@ -141,3 +141,18 @@ Practical rules for hand scheduling:
    chain produced non-monotone device times (3.75-72.4 us across configurations, see
    `probes/057-latency-model/dpas_chain.csv`), so only the XMX *issue rate* (~12.5-13 cycles) is
    measured. Treat dpas latency as "at least 21 cycles, probably more".
+
+## DG2 16-SBID saturation, Short UGM waits, and SLM address GRF reuse `[MEASURED]`
+
+Verified via `zeModuleGetNativeBinary` + `ocloc disasm` across `GRF=256 cab4` BF16 GEMM variants on A770 (oneAPI 2026.2, `commit bf81332`):
+
+1. **16-SBID saturation and monotonic `Short UGM waits (<120 ins)` correlation**:
+   - DG2 has only **16 hardware SBID tokens (`$0..$15`)** per thread shared across all `send.ugm` and `send.slm` messages. When total in-flight messages exceed `~14`, IGC's `reuseTokenSelection` steals the oldest in-flight UGM token, creating **`Short UGM waits (<120 ins)`** or forcing an immediate `sync.allwr` before the first `dpasw`.
+   - Across `cab4` `4096x4096x4096` (`XL`) kernel schedules, `Short UGM waits (<120 ins)` correlates strictly monotonically with runtime: **`1 -> 5 -> 7 -> 9 -> 11` waits correspond to `1486 -> 1552 -> 1600 -> 1703 us`** (`[MEASURED]`, `1` wait is `14.6%` faster vs `11` waits).
+   - **2-iteration wrap-around disassembly audit**: Global `send.ugm` loads issued near the end of an unrolled main-loop iteration are consumed at the start of the next iteration; statically check SBID reuse/wait distance across **two consecutive iterations wrapped around** (`goto`/`jmpi` backedge) and verify `< 120 ins` stalls stay `<= 1` (with `sync.allrd == 0`).
+   - **Phase sensitivity**: Do not burst global UGM loads back-to-back; interleave them sparsely with `store.slm` and `dpasw` phases, and merge `B` loads where possible (e.g., `128 B` `d64x16t` halves SBID consumption). Never pre-issue next-step `load_slm` into a tail already crowded with global loads (causes 16-SBID saturation, regressing `Btile192` to `337 us` `[MEASURED]`).
+2. **SLM address GRF reuse chains (`SLM addr chains`)**:
+   - Deep `cab4` loops carry ~60 loop-invariant SLM offsets, exceeding free address GRFs and causing IGC to serialize multiple `load.slm` or `store.slm` operations through the same reused address GRF (`{$X.src}` + `{A@1}`).
+   - Interleaving `load_slm_ops` with `store_buf` (`store.slm` + `load.slm`) cuts `SLM ld addr chains` from **`45/48` down to `8/48`** (`wide` improves `382 -> 377.4 us` `[MEASURED]`).
+3. **`-Xfinalizer` leverage on SWSB**:
+   - Passing `-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR` to ESIMD VC allows non-overlapping `dpasw` macros to share SBIDs (`$9` / `$12`) and prunes redundant waits: **`sync.allrd 5 -> 0`**, **`Short UGM waits 5 -> 1`**, and **`sync.nop 34 -> 23`** `[MEASURED]`.

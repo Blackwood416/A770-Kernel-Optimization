@@ -11,11 +11,11 @@ Re-measure before transferring to other GPUs, drivers, or shapes.
 
 ## Contents
 
-- Compared routes
-- Accuracy-matched and fastest-only oneDNN baselines
-- Toolchain gate
-- Host pre-dequantization boundary
-- Negative results and pitfalls
+- Three Routes Compared
+- oneAPI 2026.2 ESIMD Fast Path (`BK=gs=64` Zero-Branch Dequant + XMX `dpasw`)
+- oneDNN Baseline
+- Why Host Pre-Dequant Is Not a Weight-Only Solution
+- Negative Results and Pitfalls
 
 ## Three Routes Compared
 
@@ -40,6 +40,27 @@ dispatch rule.
 M=1 crossover: `[MEASURED]` R2 is a negative path (`4.47 ms` at
 `1x4096x4096`) because only 4 work-items per work-group are used; R1 is
 `1.76 ms`, R3 is `0.126 ms`, oneDNN is `0.036 ms`.
+
+## oneAPI 2026.2 ESIMD Fast Path: BK=gs=64 Zero-Branch Dequant + XMX dpasw `[MEASURED]`
+
+Breaking the 2026.1 host-predequant boundary above, on **oneAPI 2026.2 + driver `32.0.101.9150`** (`Aurex v0.2`,
+`errors=0` vs CPU reference, zero external dequantization buffer), ESIMD `xmx::dpasw` achieves high XMX throughput
+directly on `NF4` / `INT4Sym` weights when `BK` matches `group_size`:
+
+1. **`Gemm4BitFastEsimdKernel` (`512x4096x4096`, `gs=64`, 5x-batched L0 Regular Replay `[MEASURED]`)**:
+   - **Geometry & zero-branch scale reuse**: `BM=64, BN=64, BK=64, WG=32 (8x4)`. Aligning **`BK == group_size == 64`**
+     eliminates per-iteration integer division and branching inside the K-loop (one `scale` per K-tile).
+   - **Coalesced 16 B reads & SLM LUT**: Load packed 4-bit weights via `4x16 B` OWord `block_load<uint32_t, 4>`, stage
+     the 16-entry `float` codebook at the tail of SLM (`32,832 B <= 48 KB`), dequantize via SIMD16 `esimd::slm_gather`,
+     and write 16 B-aligned VNNI slots via `esimd::slm_block_store<uint32_t, 4>` before `dpasw<8,8>`.
+   - **Measured vs initial byte/8B path**: `gemm_nf4_fast_dpasw` reaches **`763.92–764.08 us` (`22.49 TFLOPS`)** and
+     `gemm_int4_fast_dpasw` reaches **`699.10–706.56 us` (`24.57 TFLOPS`)** — **`12.95x` faster** vs the initial
+     8 B-strided + dynamic register-array LUT baseline (`9886.56 us / 1.74 TFLOPS`; 32-bit + scalar SLM LUT still
+     stalled at `9233 us / 1.86 TFLOPS` due to 8 B fragmented stride thrashing and loop division).
+2. **Decode GEMV (`4096x4096, group_size=64`, `9.4 MB` packed weights, 20x-batched L0 Regular Replay `[MEASURED]`)**:
+   - `NF4` (`rows=1`): **`40.13–40.23 us`** (`235.2 GB/s`, **`2.50x–2.51x`** faster vs `bf16` GEMV `100.51–100.68 us`);
+     `rows=4` reuse hits `47.83–47.87 us` (`11.96–11.97 us/tok`).
+   - `INT4Sym` (`rows=1`): **`27.73–29.03 us`** (`325.1–340.4 GB/s`, **`3.47x–3.62x`** faster vs `bf16` GEMV).
 
 ## oneDNN Baseline
 

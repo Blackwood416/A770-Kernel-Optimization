@@ -29,7 +29,8 @@ index; each item names the working instrument and the fallback if it does not ex
 | Cost of `r[a0.0]` vs direct addressing | same vehicle; only the encoding difference is provable | EU counters |
 | join/call stack depth cost | depth is encodable but not priceable | EU counters |
 | Explicit prefetch | IGA has no prefetch mnemonic; CL `__builtin_prefetch` fails to compile; ESIMD `prefetch` emits 0 instructions | a newer IGA with prefetch, or IGC pass logs + counters |
-| 256-GRF mode | driver never compiles with it (I-002) | a driver/IGC build that exposes it |
+| 256-GRF mode (legacy OpenCL `.spv`) | legacy OpenCL `.spv` runtime compile stays locked at 128 GRFs (I-002); **use SYCL ESIMD `grf_size<256>` or L0 binary instead** | SYCL/ESIMD `experimental::grf_size<256>` (`commit bf81332`) |
+| VTune `eu-stall-sampling` | not supported on DG2 Windows (`-collect eu-stall-sampling` fails) `[TOOLCHAIN]` | use `full-compute` / `lsc-slm` (`-allow-multiple-runs`) + `ocloc disasm` |
 | Bindless (ExBSO) from OpenCL | no bindless heap in the OpenCL path | Level Zero |
 | L1/L2 associativity | no cache-configuration counters | hardware counters; keep the `[HEURISTIC] ~192 KB/subslice` figure |
 
@@ -72,3 +73,28 @@ not mix the two when attributing the gap to oneDNN.
   - **Medium/long kernels (`>= 335` us)** (e.g., `s2048` at `6.7`–`8.1` buckets and `~97%` raw capture): the remaining `13.15%`–`13.65%` `XVE Array:Idle(%)` stays nearly constant across `ctrl` / `order` / `slm_tree` and represents **intra-kernel barrier-drain / tail idle**, NOT `ev.wait()` dilution; dividing by `duty_cycle` over-estimates DRAM reads by `~12%` (`150.190` / `149.802` MB vs `134.218` MB theoretical, pushing resident bandwidth past the `403.1` GB/s roof `[TOOLCHAIN]` `docs/92`).
 - **Multi-lambda and prepack kernel parsing in `vtune -report hotspots -group-by computing-task` (`docs/94`, `probes/118-operator-anatomy/accepted.json`)**: Executables with separate warmup, setup, or verification launches (e.g., `bench/f32_rmsnorm.cpp` `rmsnorm_row_tile` warmup `Instance Count=2/20` vs timed loop lambda `10/1000`, `bench/int8_gemm_esimd.cpp -DGEMM_PREPACK=1` `prepack()` `Instance Count=1`, or `bench/f32_gemv.cpp` verification `launch()` `1021` vs `1020`) emit multiple `computing-task` rows; `parse_hotspots_csv` selects the lambda row whose `Instance Count` is closest to `samples * batch` and normalizes per-launch instruction counts by that row's actual reported `Instance Count` (`[TOOLCHAIN]` `docs/94`).
 - **Verifying `256-GRF` (`General Register File Size = 256`) and SWSB scoreboard `Synchronization` counts on Level Zero / ESIMD kernels (`docs/96`, `docs/97`, `probes/120`, `probes/121`)**: While `docs/32-large-grf.md` found OpenCL `.spv` runtime recompilation locked at `128` GRFs, `vtune -report hotspots -group-by computing-task` on `0.05` ms OA collections of `oneDNN` (`ONEDNN_VERBOSE=all` `grf256`, Level Zero `binary_kernels:enabled`) directly reports `Computing Task:General Register File Size = 256` (`Spill Memory Size = 0`) and `SIMD Width = 8` (`[TOOLCHAIN]` `[MEASURED]` `docs/96`). In GT-PIN `instruction-count`, Xe-HPG software scoreboard instructions (`sync.allrd`/`sync.nop`) are counted inside the `Synchronization` class alongside work-group barriers (`bf16_btile_dpasw` reports `96` `Synchronization`/thread vs `33` from `16` barriers alone `[TOOLCHAIN]` `[MEASURED]` `docs/97`).
+
+## L0 native binary disassembly and register-spill audit pipeline `[MEASURED]` `[TOOLCHAIN]`
+
+For SYCL/ESIMD `GRF=256` production kernels (`oneAPI 2026.2`, `commit bf81332`), Level Zero `KernelDiag` alone is
+insufficient:
+
+1. **`KernelDiag.spillMemSize == 0` false-negative gate `[BUG]`**: `zeKernelGetProperties` can report
+   `spillMemSize == 0 B` and even `privateMemSize == 0 B` while the actual main loop emits `35–67` **`send.dc0`
+   scratch spills** (e.g., `acc[4][6]` using 192 GRF), or emits **`privateMemSize = 576–1088 B`** from LLVM SROA
+   failure on runtime-indexed `simd[]`. **Audit rule**: require `spillMemSize == 0 && privateMemSize == 0` AND confirm
+   **main-loop `send.dc0 == 0`** in disassembly.
+2. **Native `.zebin` export & `os.walk` disassembly**:
+   - Extract executable bundle handles (`sycl::get_native<sycl::backend::ext_oneapi_level_zero>`) and dump native binary
+     via `zeModuleGetNativeBinary` to `.zebin` (or `.bin`).
+   - Run `ocloc disasm -file <kernel>.zebin -device dg2 -dump <out_dir>` (do not wrap in `cmd /c "mkdir ... && ocloc"`
+     where existing directories fail `mkdir`; use PowerShell `New-Item -Force`).
+   - Walk `<out_dir>` with `os.walk` matching `.endswith(".asm")`, because `ocloc` emits dot-prefixed `.text.*.asm` files
+     that naive shell `glob` patterns skip.
+3. **2-iteration wrap-around static audit metrics**: Identify the loop basic block with maximum `dpasw` ops ending in a
+   backward `goto`/`jmpi`. Scan **two back-to-back iterations wrapped across the backedge** to count:
+   - `send.dc0` inside the loop body (hard requirement: **`0`**);
+   - `dummy_dpasw` (`null:f` occurrences; `0-Dummy` target: **`1`**);
+   - `sync.allrd` (target with `-Xfinalizer -SWSBDepReduction`: **`0`**) and `sync.nop`;
+   - `Short UGM waits (<120 ins)` / UGM SBID clobbers (target **`<= 1`**, vs `5–11` regressed `1552–1703 us`);
+   - `SLM ld/st addr chains` (consecutive `load.slm` / `store.slm` overwriting the same address GRF).

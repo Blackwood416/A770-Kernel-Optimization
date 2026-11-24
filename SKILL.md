@@ -23,9 +23,9 @@ request that asks what to ship, state that this skill cannot make that
 selection. Do not recommend either a library or custom route for production
 until it passes target-device correctness and performance measurements.
 
-## 1-Minute A770 Engineering Quick Sheet (P12-P14)
+## 1-Minute A770 Engineering Quick Sheet (P12-P14 + Aurex v0.2)
 
-Use this before opening deep reference pages (`docs/94`-`docs/102`, `C0329`-`C0355`):
+Use this before opening deep reference pages (`docs/94`-`docs/102`, `C0329`-`C0355`, `Aurex v0.2` `commit bf81332`):
 
 - **Classify the kernel into Domain I or Domain II first (`docs/94`)**:
   - **Domain I (DRAM stream-through: GEMV, RMSNorm, Softmax, SDPA)**: `XMX=0%`,
@@ -33,13 +33,27 @@ Use this before opening deep reference pages (`docs/94`-`docs/102`, `C0329`-`C03
     float4 read roof (`probes/087-roof/work/roof.csv`) via wide `vec16` loads,
     interleaved concurrent address streams (`SDPA_ORDER=1`), and zero register
     spill; standard SYCL sub-group kernels suffice.
-  - **Domain II (L3-resident XMX matrix: bf16/int8 GEMM)**: `DRAM/L3` `10%-19%`,
-    L3 hit `81%-89%` `[MEASURED]`. Surpass `oneDNN` on `S1` (`1024x1536x512`)
-    with full-wave `32`-WG ESIMD tiles (`int8` needs `BK=64` to unlock `BN=192`),
-    `64 B` coalesced staging/epilogue, peeled K-loop, and fused-EU
-    `esimd::xmx::dpasw<8,8>` + bit-swapped SLM `A` (`docs/97`, `C0343`-`C0345`).
-    For wide multi-wave shapes (`S2`), note `oneDNN` natively uses Level Zero
-    `grf256` (`docs/96`, `C0341`).
+  - **Domain II (L3-resident XMX matrix: bf16/int8/4-bit GEMM & SwiGLU)**: `DRAM/L3`
+    `10%-19%`, L3 hit `81%-89%` `[MEASURED]`. Unlock **`GRF=256` + `WG=32` +
+    `cab4` (`4 x 12 KB = 48 KB` SLM = `2 WGs/Xe-core = 64/64` HW threads)** via
+    `sycl::ext::intel::experimental::grf_size<256>`, `split_barrier` decoupling,
+    `0-Dummy` `dpasw<8,8>` (`2x8`/`3x4` grouping, `dummy=1`), `bp_vec` (`-94 ins`),
+    `L1StreamB` (`st.ca`, `K>=4096` `swizzle<=4`), `wb.wb` C store (keep `st.uc`
+    for ResidualAdd), and ESIMD VC `-Xfinalizer` 4-flag optimum (`-SBIDBundle
+    -SWSBDepReduction -nopresched -twoSrcBundleBCR`): reaches **`92.5 TFLOPS`** on
+    `4096^3` (`1.10x` vs oneDNN) and **`33–35 WIN | 4–6 TIE | 0 LOSE`** across 39
+    shapes vs `oneDNN 3.13.2` (including `SwiGLU` `79.6 TFLOPS`, `INT8` `129.6 TOPS`,
+    and `4-Bit` `BK=gs=64` online dequant `22.49–24.57 TFLOPS`).
+  - **Domain I Tier-3 fusion & Decode baselines**: In-process `ocloc64.dll` ->
+    `zeModuleGetNativeBinary` `.zebin` SHA-256 cache (`ZE_MODULE_FORMAT_NATIVE`)
+    fuses 5-op `1024x4096 f32` chains to `399.6 GB/s` (`99.1%` roof, `2.73x` vs
+    unfused baseline `[MEASURED]`); `bf16` Decode SDPA (`ORDER=1`) hits `386.0 GB/s`
+    (`95.7%` roof); `NF4`/`INT4Sym` Decode GEMV hits `40.1 / 27.7 us` (`2.50x / 3.62x`
+    vs `bf16` GEMV).
+  - **Production spill & SBID iron rule**: `KernelDiag.spillMemSize == 0` has
+    false negatives (`acc[4][6]` spills `35–67` `send.dc0`; runtime `simd[]`
+    indexing breaks SROA with `priv=576–1088 B`). Always verify `spill == 0 &&
+    priv == 0` AND `ocloc disasm` main-loop `send.dc0 == 0` with `Short UGM waits <= 1`.
 - **Runtime, Graph, Copy Engine, and Fusion rules on Windows WDDM (`docs/99`-`docs/102`)**:
   - **Never enable `UR_LOADER_USE_LEVEL_ZERO_V2=1` globally on uncaptured dynamic
     loops or dual-SYCL-queue Copy overlap**: uncaptured `L=256` chains slow down

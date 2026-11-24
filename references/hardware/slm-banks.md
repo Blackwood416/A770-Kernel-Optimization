@@ -45,9 +45,16 @@ per lane per iteration, address `(lane * STRIDE + r) & 4095`. The loop-overhead 
    pad the row pitch by one element (odd stride) and the penalty disappears.
 4. Do not "spread out" broadcast reads; same-address access is the cheapest case.
 
+## Store (write) side banking, alignment, and SLM read wall `[MEASURED]`
+
+Measured on A770 (oneAPI 2026.2, driver `32.0.101.9150`, ESIMD `GRF=256 + WG=32`) via `ocloc disasm` and VTune `full-compute`:
+
+1. **Write-side 256 B stride triggers an 8-way conflict**: Using `esimd::slm_scatter<uint32_t, 64, 4>` / `lsc_slm_scatter` with a 256 B stride (`256 B = 0 mod 128 B`) causes a hardware 8-way SLM store bank conflict (`mov` packing rises `143 -> 218`, `1024x4096` regresses `454 -> 470 us`, and `4096x4096x4096` slows by `+79 us` from `1733 -> 1812 us`) `[MEASURED]`.
+2. **Coalesced `4x64 B` (`store.slm.d64x8t`) store reduction**: Coalescing `8x32 B` B-tile SLM writes into `4x64 B` (`store.slm.d64x8t`, packing adjacent `uint16_t` pairs into `32x8 B` block writes) plus `1x128 B` A store cuts per-`BK=16` `store.slm` ops from `9` to `5`, reducing SLM write traffic by `24%–31%` (`0.395 GB -> 0.301 GB`) and freeing SBID tokens `[MEASURED]`.
+3. **`slm_block_store` enforces strict 16 B (OWord) hardware alignment `[BUG]` `[CORRECTNESS]`**: Passing an 8 B-aligned offset (e.g., `slm_block_store<uint32_t, 2>`) does **not** fault; DG2 silently truncates the address down to 16 B granularity and overwrites adjacent elements. Always align offsets to 16 B and emit `slm_block_store<uint32_t, 4>` or wider.
+4. **Physical `128 KB` SLM co-residency cliff at `GRF=256 + WG=32`**: With 64 HW threads/Xe-core at `GRF=256`, **`SLM <= 48 KB` (`<= 49,152 B`, e.g., `cab4` `4 x 12 KB = 48 KB`) sustains `2 WGs/Xe-core = 64/64` HW threads** (`2 x 48 KB = 96 KB <= 128 KB`). On `Btile192` (`2048x3072x2048`), `WG=32 / 48 KB` hits **`290–300 us`**, far outperforming `WG=24 / 40 KB` (`362 us`, under-occupied) and `WG=48 / 56 KB` (`452 us`, `2 x 56 > 128 KB` forces 1 WG/Xe-core barrier stalls) `[MEASURED]`.
+5. **Measured DG2 SLM read bandwidth wall**: VTune `full-compute` measures practical/peak SLM read throughput at **`3.29–3.77 TB/s`** (`Btile192` `3,288 GB/s`, oneDNN `cab4` `3,769 GB/s`). Once near `3.3+ TB/s`, further gains require higher M/N reuse per SLM byte (e.g., `cab4` `BK=16` vs `BK=32`), not raw `store`/`load` micro-tweaks `[MEASURED]`.
+
 ## Still open
 
-- Store (write) side banking, `d8`/`d16` elements.
-- The exact `send.slm` form IGC emits for these accesses (block load vs per-lane gather) — both
-  appear in `probes/040-slm-banks`, not yet inspected.
-- Whether the 3.29x at 256 B is an arbitration artifact or a true bank-count effect.
+- Exact hardware arbitration mechanism behind the 256 B bank cliff (arbitration artifact vs physical bank count) and `d8`/`d16` scattered sub-word writes.

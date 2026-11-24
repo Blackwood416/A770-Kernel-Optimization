@@ -12,6 +12,8 @@
 - Structural experiments that failed
 - Behavioral traps
 - Diagnostic traps
+- P13-P14 Runtime, Level Zero, and ESIMD production traps
+- Aurex v0.2 GRF=256, ESIMD codegen, and compiler production traps
 
 Cross-reference: the code that hits these gates lives in [code-snippets.md](../api/code-snippets.md); API details and commands are in [api-usage.md](../api/api-usage.md); the SDP-specific campaign is in [sdpa-a770.md](../techniques/sdpa-a770.md).
 
@@ -171,3 +173,23 @@ All variants were correct (`errors: 0/...`) and slower than the stated baseline.
 - **Single-CCS multi-queue compute concurrency illusion**: A770 exposes `numQueues=1` on `ordinal 0`, so two independent compute queues always yield **`0.00%`** hardware timestamp overlap across `2-32` WGs (`[ARCH]` `[MEASURED]` `docs/101`, `C0353`). Wall-clock overlap (`13.6%-21.2%`) is purely WDDM submission-tax amortization; fuse small compute ops into one kernel instead.
 - **Cached host memory breaks GPU doorbell polling, and uncached spins trigger TDR fast**: `sycl::malloc_host` and `sycl::malloc_shared` fail GPU-polled doorbell visibility `0/10` (stale GPU cache); only `ZE_HOST_MEM_ALLOC_FLAG_BIAS_UNCACHED` passes `10/10` (`6.00 us` 0 B RTT, `13.0x` vs `78.00 us` event-split `[MEASURED]` `docs/101`, `C0354`). However, one uncached PCIe spin takes `1123.12 ns` (`1183.72 ns` `atomic_sys`), so a `5,000,000`-spin cap takes `~5.6 s` and triggers Windows 2 s TDR (`40 ms` = `~35,615` spins).
 - **UMF `>= 16 MB` allocation cliff and dynamic `zeEventPoolCreate` tax**: `sycl::malloc_device` jumps from `0.60-0.70 us` (`<= 1 MB`) to `636.70 us` (`16 MB`) and `1863.35 us` (`64 MB`, `3.7x-4.4x` slower than bare `zeMemAllocDevice`), while `zeEventPoolCreate+Destroy` costs `102.80-232.35 us` vs `0.10-0.20 us` for `zeEventHostReset` (`[MEASURED]` `docs/101`, `C0355`). Pre-allocate a Device Arena and static `zeEventPool`.
+
+## Aurex v0.2 GRF=256, ESIMD Codegen, and Compiler Production Traps `[MEASURED]` `[BUG]`
+
+Measured on Intel Arc A770 (`oneAPI 2026.2`, driver `32.0.101.9150`, `Aurex v0.2` `commit bf81332`, all correctness checks `errors=0`):
+
+- **`KernelDiag.spillMemSize == 0` false negative (`send.dc0` hidden spills) `[BUG]`**: `zeKernelGetProperties` frequently reports `spillMemSize = 0 B` even when the disassembly main loop contains `35–67` **`send.dc0` scratch spills** (e.g., `acc[4][6]` using 192 GRFs out of 256 leaves too few registers for A/B/A64 pointers). Always verify `spill == 0 && priv == 0` **and** `ocloc disasm` main-loop `send.dc0 == 0`.
+- **Runtime-indexed `simd[]` breaks LLVM SROA (`privateMemSize = 576–1088 B`)**: Indexing an array of `esimd::simd` buffers with a runtime loop variable prevents register promotion (`spillMemSize` stays `0`, `priv` spikes to `576–1088 B`), degrading `512x4096` from `240 -> 661 us` (`~2x` slower vs named SSA baseline). Use compile-time 2-way unrolling and named SSA variables (`a0_0..a0_3`, `a1_0..a1_3`).
+- **`.select<16,1>() = block_load(...)` emits blocking `mov {$dst}`**: IGC cannot write a `block_load` directly into a sub-slice of a wider `simd`; it inserts temporary GRFs followed by `mov {$dst}`, serializing global loads before compute starts. Load directly into standalone 1-GRF `simd` variables. Note also `.bit_cast_view<uint32_t>()` rejects `const simd&` parameters; pass non-`const` references.
+- **`esimd::slm_block_store` 16 B (OWord) silent overwrite `[BUG]` `[CORRECTNESS]`**: Passing an 8 B-aligned offset (`slm_block_store<uint32_t, 2>`) silently rounds the address down to 16 B and corrupts adjacent SLM entries. Always use 16 B-aligned `slm_block_store<uint32_t, 4>`+.
+- **Dynamic `CAB3` 3-buffer index with 4-way unroll (`4 % 3 != 0`)**: Produces `394,109` cross-check errors (`44,037–53,037` per large GEMM shape) from non-disambiguated SLM slots. Match buffer count statically (`cab4` with 4-step compile-time phase).
+- **`WG=48 / 56 KB SLM` and `WG=24 / 40 KB SLM` vs `WG=32 / 48 KB` (`Btile192`)**: At `GRF=256`, `SLM > 48 KB` forces `1 WG/Xe-core` (`WG=48` runs `452 us`, barrier-stalled) and `WG=24` under-occupies (`362 us`), both far slower than `WG=32 + 48 KB` (`290–300 us`, `2 WGs/Xe-core = 64/64` HW threads `[MEASURED]`). Similarly `WG=64` on RowMajor GEMM loses to `WG=32 + SLM <= 48 KB`.
+- **Trying `dpas<8,8>` or `1x16` macros to dodge `dummy_dpasw (null:f)`**: Replacing `dpasw` with `dpas` still emits `null:f` while doubling `A` SLM read traffic, regressing `2048x4096x2048` by `-12.4%` vs `dpasw`; merging into `1x16` splits via `sync.allwr` (`dummy 1 -> 17`, `wide 385 -> 433 us` `[MEASURED]`). Use `0-Dummy` `2x8`/`3x4` grouping (`dummy = 1`).
+- **`slm_scatter` 256 B stride & non-transposed `lsc_gather`**: `slm_scatter` at `256 B` stride triggers an 8-way SLM write bank conflict (`mov 143 -> 218`, `4096^3` slower by `+79 us` `[MEASURED]`); non-transposed `SIMD8` `lsc_gather` cuts `LMHd` by `-20%` vs contiguous `block_load` (`406 -> 506 us` `[MEASURED]`).
+- **`esimd::prefetch` in `K=4096` GEMM loops**: Emits `~50` extra 64-bit address ALU ops per step and consumes 4–6 SBIDs (`sync.allrd` stalls + L1 eviction), strictly negative vs non-prefetch baseline.
+- **`K >= 4096` with `swizzle >= 8`, or `wt.wb` C stores**: `swizzle=8` overflows the `16 MB` L3 on `4096^3` (`+71 us` slower vs `swizzle=4`); `L1=write_through, L2=write_back` (`wt.wb`) regresses `wide` by `+17 us` vs `wb.wb` (`L1=write_back, L2=write_back`).
+- **CFG / register-coloring sensitivity & `-Xfinalizer` blacklist**: Minor control-flow or variable-scope edits outside the inner loop can flip IGC graph coloring (`SLM st chains` `18/40` vs `40/40`), so re-audit disassembly after any edit. Never pass ICE flags (`-dpasScheduleBarrier`, `-presched-ctrl 1/2`, `-IGASWSB`, `-raBlockLocalScan`, `-enableDpasFwd 1`, `-dpasMacroBySrc1RS`) or regressors (`-globalTokenAllocation`, `-distPropTokenAllocation`, `-SBIDL3Hit`, `-noschedule`, `-SWSBMakeLocalWAR`, `-SWSBReplaceARWithAW`).
+- **Benchmarking & Windows shell traps**:
+  - Cold-GPU first-launch clock downthrottling slows standalone large GEMMs by `15–20 us`; always include warmup iterations before sampling.
+  - `cmd /c 'set VAR=val && prog.exe'` appends a trailing space before `&&` to `VAR`; assign `$env:VAR = "val"` in PowerShell instead. Also `ocloc disasm` outputs dot-prefixed `.text.*.asm` files—walk `<dir>` with `os.walk`, not shell `*.asm` glob.
+  - VTune `eu-stall-sampling` is unsupported on DG2 Windows (`[TOOLCHAIN]`). Keep `KernelRegistry` structs free of dead fields under L0 `zeKernelSetArgumentValue`.

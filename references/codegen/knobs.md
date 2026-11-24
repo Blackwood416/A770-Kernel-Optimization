@@ -4,10 +4,10 @@
 kernel with each flag, disassembling, and diffing line by line (`probes/048-knobs/knob_atlas.ps1`,
 `docs/23-compiler-knobs.md`). Kernel: mul-add, divide, `sqrt`, int conversion, SLM + barrier, atomic add.
 
-## 1. The vISA flag surface is unreachable from ocloc `[TOOLCHAIN]`
+## 1. The vISA flag surface is unreachable from OpenCL `ocloc` `[TOOLCHAIN]`
 
 `VISAOptionsDefs.h` defines **487** `-options` (416 of them not dump/debug). None of them can be
-delivered by ocloc:
+delivered via the legacy OpenCL `ocloc` path:
 
 | attempt | result |
 |---|---|
@@ -54,3 +54,29 @@ Rejected by ocloc: `-options -O2` / `-O3`, `-cl-intel-has-bindless-style-buffers
    allocation wholesale and is the entry point for measuring large-GRF behaviour.
 4. A flag that "builds fine" has not necessarily done anything: always diff the disassembly, not just
    the binary hash (metadata alone makes hashes differ).
+
+## 4. SYCL/ESIMD VC `-Xfinalizer` reachable knobs `[MEASURED]` `[TOOLCHAIN]`
+
+Unlike OpenCL `ocloc`, the **SYCL/ESIMD VC backend** (verified on A770 / oneAPI 2026.2 / driver `32.0.101.9150`)
+delivers `-Xfinalizer <flag>` straight into the IGC vISA finalizer and substantially rewrites SWSB tokens,
+scheduler ordering, and sync placement.
+
+Two verified delivery channels:
+
+1. **Static AOT (CMake `target_link_options`, zero runtime env vars)**:
+   `-fsycl "SHELL:-Xs \"-Xfinalizer -flag1 -Xfinalizer -flag2 ...\""`
+2. **Runtime rapid sweep without rebuild**:
+   Set `SYCL_CACHE_PERSISTENT=0` (prevents IGC persistent cache from silently serving stale binaries) and
+   `SYCL_PROGRAM_APPEND_COMPILE_OPTIONS="-Xfinalizer <opt> ..."`.
+
+Across a ~45-flag systematic ablation on `GRF=256 dpasw` BF16 GEMM (`bf81332` baseline vs `7ec1b93`):
+
+| Status | Flag(s) | Measured effect on DG2 ESIMD `dpasw` |
+|---|---|---|
+| **Optimal 4-flag set** | `-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR` | `[MEASURED]` `sync.allrd 5 -> 0`, `Short UGM waits 5 -> 1`, `sync.nop 34 -> 23`, `4096x4096x4096` bf16 GEMM `1555 -> 1488 us` (`1.10x` vs oneDNN) |
+| **`-SBIDBundle` (role)** | Part of optimal set | Allows non-overlapping RAW/WAW `dpasw` macros to share SBIDs (e.g., `$9` / `$12`), preventing 16-SBID thrashing |
+| **`-SWSBDepReduction` (role)** | Part of optimal set | Global token liveness pruning removes redundant `sync.allrd` and cuts `sync.nop` |
+| **`-nopresched` (role)** | Part of optimal set | Disables pre-RA scheduler so hand-ordered ESIMD load/SLM/dpasw interleaving stays intact |
+| **`-twoSrcBundleBCR` (role)** | Part of optimal set | Reduces GRF bank conflicts across dual-source instruction bundles |
+| **Crash / ICE blacklist** | `-dpasScheduleBarrier`, `-presched-ctrl 1`, `-presched-ctrl 2`, `-IGASWSB`, `-raBlockLocalScan`, `-enableDpasFwd 1`, `-dpasMacroBySrc1RS` | `[BUG]` IGC Access Violation or compile failure (`rc=1`); do not pass on DG2 |
+| **Regression blacklist** | `-globalTokenAllocation`, `-distPropTokenAllocation`, `-SBIDL3Hit`, `-noschedule`, `-SWSBMakeLocalWAR`, `-SWSBReplaceARWithAW` | `[MEASURED]` Regresses `LLM` (`~408 -> 423 us`), `XL` (`~1555 -> 1602–1640 us`), or expands sync stalls vs optimal set |

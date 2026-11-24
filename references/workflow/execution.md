@@ -173,12 +173,21 @@ Combine P12's two-domain taxonomy (`docs/94`) with P14's runtime measurements
    activation (`SiLU`/`GELU`), residual add, dual-tile `SwiGLU`, weight
    dequant (`INT4`/`NF4`), or output quantization via compile-time functors
    matched during Tier-1 graph lowering (0 ms JIT tax, zero extra DRAM passes).
-3. **Tier 3 — Domain I streaming fusion (Generic Cached DAG Codegen)**:
+3. **Tier 3 — Domain I streaming fusion (Measured In-Process DAG Compiler + `.zebin` Cache) `[MEASURED]`**:
    fuse arbitrary contiguous elementwise, broadcast, and row-reduction chains
-   (`Residual + RMSNorm + Quant`, `RoPE + KV-Write`) by hashing the sub-DAG,
-   emitting a `vec16`/sub-group OpenCL-C/SPIR-V kernel once, compiling via
-   `ocloc` / `zeModuleCreate` into a persistent binary cache, and appending the
-   native `ze_kernel_handle_t` directly into the Tier-1 Regular Command List.
+   (`Residual + RMSNorm + Quant`, `RoPE + KV-Write`, `Add->Bias->Scale->SiLU->Mul`)
+   by hashing the sub-DAG (`SHA-256(source + deviceId + driverVersion)`):
+   - **Cold cache**: generate `vec16`/sub-group OpenCL-C source, compile to SPIR-V
+     via in-process **`ocloc64.dll` (`oclocInvoke -spv_only -device dg2 -options "-cl-std=CL2.0"`)**,
+     create the module via `zeModuleCreate(ZE_MODULE_FORMAT_IL_SPIRV)`, and persist
+     **`zeModuleGetNativeBinary`** (`.zebin`) to disk.
+   - **Warm / cross-process hit**: load the cached `.zebin` directly with
+     **`ZE_MODULE_FORMAT_NATIVE`** (0 ms JIT tax) and inject `ze_kernel_handle_t`
+     into the Tier-1 Regular Command List.
+   - **Measured payoff (A770, `1024x4096 f32` 5-op chain, 10x-batched L0 Regular Replay, `errors=0`)**:
+     collapses `5` unfused kernels (`458.30–458.33 us`) into `1` fused kernel at
+     **`167.93–168.00 us` (`399.5–399.6 GB/s` = `99.1%` of DRAM roof, `2.73x` faster vs unfused baseline)**;
+     4-op `GELU+RMSNorm` reduction fusion also passes with `0 errors`.
 
 ## 7. Historical 2026-09 Two-Stage Submission Campaign (oneAPI 2026.1 / Driver `32.0.101.8724`)
 

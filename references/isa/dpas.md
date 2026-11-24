@@ -131,10 +131,24 @@ Assembler-level legality (IGA oracle, `probes/060-dpasw`, 45 rows):
 | `{Compacted}` | rejected, same as dpas (`GED unable to compact instruction`) |
 | SWSB | `{@1,$2}` and `{$2}` accepted; `{A@1,$2}` and `{@1,$2.dst}` rejected (DPAS is a "math-class" instruction: use `{@n,$m}`) |
 
-Runtime status on this box: `xmx::dpasw` compiles and executes (same accumulator result as dpas for
-the test input), but single-work-item device times scatter over 11.146-54.271 us across eight
-configurations, so **no throughput number is claimed**. To measure it, dump the JIT zebin and confirm
-opcode 0x5A, then run an unwrapped chain of >=1024 dpasw at a pinned clock.
+Runtime status on this box (updated in oneAPI 2026.2 + ESIMD `grf_size<256>`): `esimd::xmx::dpasw<8,8>` compiles cleanly and is the core instruction for DG2 BF16 GEMM, reaching **`92.5 TFLOPS`** on `4096x4096x4096` (`commit bf81332`, `spill=0 B, priv=0 B`, main-loop `send.dc0 == 0`) `[MEASURED]`. (Earlier single-work-item micro-probes in oneAPI 2026.1 scattered over 11.1–54.3 us because 1 thread cannot saturate XMX).
+
+## IGC dummy_dpasw (null:f) injection and 0-Dummy grouping theorem `[SRC]` `[MEASURED]`
+
+In large multi-accumulator GEMM loops, `ocloc disasm` reveals IGC injecting idle 8-cycle **`dpasw.8x8 (8|M0) rX:f null:f rX:bf rX.0:bf`** instructions inside `dpasw` chains (`19/128 = 14.8%` to `17/96 = 17.7%` extra instructions, wasting `15%–18%` of XMX issue capacity `[MEASURED]`).
+
+1. **Root cause (`[SRC]` IGC vISA source: `SWWA.cpp`, `SWSB_G4IR.cpp`, `LocalScheduler_G4IR.cpp`)**:
+   - On DG2, `hasDpasSrc2ReadSupression() == false` and `getDpasSrcCacheSize(Opnd_src1) == 512 B` (2 B-operands). Whenever any `dpasw` `src1` in the kernel was written by a non-`send` instruction (e.g., packing `mov` or register reuse), `prepareDPASFuseRSWA` sets `mayNeedRSWA = true`.
+   - `SWSB_G4IR::needWA`: whenever an emitted `dpasw` macro has `macro.len > 1` AND **`first->src1 == second->src1`** (the first two instructions of a macro read the same `B` register), IGC prepends an 8-cycle `dummy_dpasw (null:f)`! Only the very first macro of a basic block requires 1 unavoidable entry dummy; all subsequent dummies are eliminable.
+   - **Negative verification**: Switching back to `dpas<8,8>` does **not** eliminate `null:f`—IGC still inserts dummy `dpas`, while doubling `A` SLM read bandwidth and overflowing DG2 SLM read throughput (`2048x4096x2048` regresses **`-12.4%`** vs `dpasw`) `[MEASURED]`.
+2. **Why naive `b0, b1, b0, b1` alternation fails**: `LocalScheduler_G4IR` (`canInSameDPASMacro` and `applyDpasHeuristic`) pulls adjacent `size()==1` nodes with identical `src1` together and splits pairs arriving on different SLM SBIDs (`a01` vs `a23`).
+3. **0-Dummy Grouping Theorem (verified on A770 to cut main-loop `dummy_dpasw` from `19/16/11` down to the theoretical floor of `1`)** `[MEASURED]`:
+   - **Condition A (Single lead + grouped followers)**: Within each DPASW macro, at most **one** `src1` group may have `size == 1` (using distinct `B` registers across macro heads); all remaining same-`src1` uses must be grouped into contiguous **`size >= 3`** blocks.
+   - **Condition B (Macro-head alternation)**: The first two instructions of every macro must read different `src1` operands (`first->src1 != second->src1`).
+   - **Condition C (Tail-SBID anchoring)**: Anchor every macro's scheduling dependency on the **last-issued SLM load (`a23`)** so IGC emits a single `sync.allwr` and keeps the macro contiguous in source order.
+   - **Condition D (DG2 macro cap `<= 8`)**: `2x8` macros (4 `B` operands, 8 ops/macro) and `3x4` macros (3 `B` operands, 4 ops/macro) hold intact cleanly. Forcing a `1x16` single macro splits after the second `src1` switch via `sync.allwr`, causing `dummy` to spike `1 -> 17` and regressing `wide (2048x4096x2048)` from `385 -> 433 us` `[MEASURED]`:
+     - **`4xB` (`2x8`, used in `128x256 cab4` & `SwiGLU`)**: Macro 1: `[b0(a3)](1) -> [b1(a0,a1,a2,a3)](4) -> [b0(a0,a1,a2)](3)`; Macro 2: `[b2(a3)](1) -> [b3(a0,a1,a2,a3)](4) -> [b2(a0,a1,a2)](3)`.
+     - **`3xB` (`3x4`, used in `Btile192`)**: Macro 1: `[b0(a3)](1) -> [b1(a0..a2)](3)`; Macro 2: `[b2(a3)](1) -> [b0(a0..a2)](3)`; Macro 3: `[b1(a3)](1) -> [b2(a0..a2)](3)`.
 
 ## Precision surface: f16 accumulation and 4/2-bit inputs
 

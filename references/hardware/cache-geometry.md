@@ -133,3 +133,19 @@ Same-work-group versus separate-work-group changes the cost by <4%, so work-grou
 **not** a usable proxy for subslice placement on this driver. The footprint curve itself (two chasers
 stay at L1 speed up to 96 KB each = 192 KB combined, then degrade) is consistent with a ~192 KB
 per-subslice budget but stays **[HEURISTIC]** - there is no counter evidence.
+
+## 9. DG2 32 Xe-Core round-robin co-residency, swizzle L3 cap, and store cache hints `[MEASURED]`
+
+Measured on A770 (`oneAPI 2026.2`, ESIMD `GRF=256 dpasw` BF16 GEMM `commit bf81332`, vs oneDNN `3.13.2`):
+
+1. **Hardware round-robin co-residency (`gid` & `gid + 32`) `[ARCH]` `[DISPATCH]`**:
+   - DG2 assigns consecutive work-groups round-robin across its `32` Xe-cores, so work-groups `gid` and `gid + 32` **always share the same Xe-core and L1 cache**.
+   - **Single-wave / small grids (`total_wgs <= 64`, e.g., `512x4096x4096` = 64 WGs)**: Use `swizzle = 1` (linear N-first) with **both `A` and `B` set to `L1=cached, L2=cached` (`ca.ca`)** so `gid` and `gid + 32` reuse `B` inside L1 (`205.95–206.72 us`, `1.05x` vs oneDNN `[MEASURED]`). Setting `B` to `L1=streaming` hurts single-wave throughput.
+   - **Multi-wave large grids (`2048x4096x2048`, `1024x4096x4096`, `4096^3`)**: Use a **`2D 8x8 N-inner` serpentine snake walk** (`N` fast within each `8x8` tile, alternating direction between stripes) so co-resident WGs share `A` in L1 while spreading `B` requests across L3 banks.
+2. **L3 working-set ceiling for `K >= 4096` (`swizzle <= 4`) `[MEASURED]`**:
+   - On `4096x4096x4096` (`256x128` tile), `swizzle = 8` inflates a single wave's `A` working set to `2048 * 4096 * 2 B = 16 MB`, colliding with the `16 MB` L3 capacity and causing thrashing. Capping `swizzle <= 4` (`1024x1024` physical square) saves **`-71 us`** (`1486.40–1495.27 us`, `1.10x` vs oneDNN `[MEASURED]`).
+3. **`L1StreamB` (`st.ca` vs `ca.ca`) `[MEASURED]`**:
+   - Under `2D N-inner` multi-wave dispatch, compile-time specializing `L1StreamB = true` to mark `B` loads as **`L1=streaming, L2=cached` (`st.ca`)** while keeping `A` as `ca.ca` protects shared `A` lines in L1 from streaming `B` eviction (`2048x4096x2048` improves `377.4 -> 373.1–374.7 us`).
+4. **Output `C` store cache-hint dispatch (`wb.wb` vs `st.uc` vs `wt.wb`) `[MEASURED]`**:
+   - **Standard / `Bias` / `SiLU` epilogue (no residual read)**: Use **`L1=write_back, L2=write_back` (`wb.wb`)**. On `LMHd (128x32768x2560)` where `C` coalesces across lines inside L3, `wb.wb` beats `st.uc` by **`-42 us`** (`414.28–415.02 us`, `1.12x` vs oneDNN), and beats `st.uc` by `-3 us` on `2048x4096x2048` (`wt.wb` regresses by `+17 us` to `391–393 us`).
+   - **`ResidualAdd` / `BiasResidualAdd` epilogue**: Keep **`L1=streaming, L2=uncached` (`st.uc`)** on `C` stores so output writeback does not evict `B` or residual buffers still hot in the `16 MB` L3 (`2048x2304+BiRes` rises from `0.98x` to `1.06x` vs oneDNN `[MEASURED]`). Avoid invalid `L1=uncached, L2=streaming`.

@@ -62,6 +62,34 @@ Steps 5-8 were measured negative on that geometry and are recorded so nobody rep
 | 21 | `int8_nopack_bk64_dpasw` (`PREPACK=0`) | `BK=64` unlocks full-wave `BN=192` (`32` WGs, `8` barriers, `-22.2%` L3 reads) + `64 B` coalesced + `dpasw<8,8>` | `64.14 us` (`25.11 TOPS`) | **`-6.65%` (`1.07x` ahead)** | [P13 ESIMD dpasw & Coalesced GEMM Core](../api/code-snippets.md#p13-esimd-dpasw-and-coalesced-gemm-core) |
 | 22 | `int8_btile_bk64_dpasw` (`PREPACK=2`) | + `Btile192` (`178` `Send`/thread, `-57.00%` vs P11; `R=1` E2E `70.82 us`) | `57.31 us` (`28.10 TOPS`) | **`-16.59%` (`1.20x` ahead)** | `docs/97-gemm-closing-gap.md` |
 
+### Aurex v0.2 Production Matrix: `GRF=256` + `WG=32` + `cab4` (48 KB) + `split_barrier` + `0-Dummy` + `-Xfinalizer` (`bf81332`) `[MEASURED]`
+
+Measured on Intel Arc A770 (Windows 11 25H2, oneAPI `2026.2`, driver `32.0.101.9150`, baseline `oneDNN 3.13.2` `jit:gemm:any`), **zero environment variables** (`-Xfinalizer` 4-flag set embedded at link time), **`cross-check errors = 0`**, all active kernels **`spill=0 B, priv=0 B`**, main-loop **`send.dc0 == 0`**, warm boost (`--mult 2`).
+
+**Core architectural jump beyond P13 (`cab4` + `split_barrier` + `0-Dummy` + `bp_vec` + `-Xfinalizer`)**:
+
+- Switching large BF16 GEMM from `24 KB` double-buffering (`BK=32`) to **`cab4` 4-buffer circular SLM (`4 x 12 KB = 48 KB <= 49,152 B` at `WG=32`, maintaining `2 WGs/Xe-core = 64/64` HW threads)** + **`split_barrier` decoupled scheduling** (`16` uninterrupted `dpasw -> sbar_wait -> slm_fence_group -> sbar_signal -> store_buf(w_buf) -> load_slm_ops(next_r_buf) -> load_b -> load_a`) + `0-Dummy` (`2x8`/`3x4` -> `dummy=1`) + `bp_vec` + `-Xfinalizer` cuts `512x4096x4096` from `248.98 us` down to **`205.95–206.72 us` (`-17%` vs double-buffer baseline)** and `4096^3` from `1762.33 us` down to **`1486.40–1495.27 us`**.
+- **Full 39-shape cross-operator scorecard vs `oneDNN 3.13.2`**: **`33–35 WIN | 4–6 TIE | 0 LOSE`** across three independent verification runs (`bf81332`):
+
+| Shape / Variant (`M x N x K`) | Baseline (`7ec1b93`) | Final (`bf81332`) | Achieved Rate | `oneDNN 3.13.2` (`us`) | Status vs oneDNN |
+|---|---:|---:|---:|---:|---|
+| `512x2560x2560` BF16 RowMajor (`Qwen4`) | `113.22 us` | `103.23–103.30 us` | `64.97–65.01 TFLOPS` | `107.72–108.80 us` | **`1.04x–1.05x WIN`** |
+| `512x4096x4096` BF16 RowMajor (`Llama`) | `248.98 us` | `205.95–206.72 us` | `83.11–83.42 TFLOPS` | `216.77–217.88 us` | **`1.05x WIN`** |
+| `512x4096x4096` + `Bias+SiLU` | `249.12 us` | `211.70–212.27 us` | `80.94–81.15 TFLOPS` | `217.70–219.57 us` (oneDNN ref) | **`1.03x–1.04x WIN`** |
+| `1024x4096x4096` BF16 RowMajor | `460.82 us` | `394.24–394.90 us` | `87.01–87.15 TFLOPS` | `391.56–395.72 us` | **`0.99x–1.00x TIE`** |
+| `2048x4096x2048` BF16 RowMajor (`wide`) | `418.06 us` | `374.70–375.16 us` (`373.10 us` peak) | `91.59–92.09 TFLOPS` | `365.48–366.78 us` | **`0.97x–0.98x TIE`** |
+| `4096x4096x4096` BF16 RowMajor (`XL`) | `1762.33 us` | `1486.40–1495.27 us` | `91.92–92.46 TFLOPS` | `1639.17–1647.57 us` | **`1.10x WIN`** |
+| `128x32768x2560` BF16 RowMajor (`LMHd`) | `456.88 us` | `414.28–415.02 us` | `51.74–51.84 TFLOPS` | `463.24–463.78 us` | **`1.12x WIN`** |
+| `2048x3072x2048` BF16 `Btile192` | `363.66 us` | `290.00–291.96 us` | `88.26–88.86 TFLOPS` | `292.84–292.94 us` | **`1.00x–1.01x TIE`** |
+
+Additional fused & quantized operator families in the same `Aurex v0.2` suite (`[MEASURED]`, `0 errors`):
+
+- **Horizontally Fused `SwiGLU` (`SiLU(A@W_gate) * (A@W_up)`, 4/4 WIN vs `oneDNN 3.13.2`, `1.07x–1.73x`)**: Shares `A` in SLM inside one kernel and keeps Gate+Up accumulators in GRF (eliminating intermediate DRAM traffic); `512x4096x2560` hits **`269.62–270.08 us` (`79.51–79.65 TFLOPS`, `1.08x` vs oneDNN `292.26–292.46 us`)**, `1024x1536x1024` hits **`104.26 vs 180.18 us` (`1.73x` vs oneDNN)**.
+- **`INT8` GEMM (`I8xI8 -> I32`, 6/6 WIN vs `oneDNN 3.13.2`, `1.08x–2.29x`)**: `512x4096x4096` (`GRF=256 BK=64`) reaches **`132.52 vs 144.78 us` (`129.64 TOPS`, `1.09x` vs oneDNN)**; `1024x1536x512 Btile192` reaches `22.52 vs 51.50 us` (`2.29x` vs oneDNN).
+- **`BF16` Decode GEMV (`W[N,K]` RowMajor, 4/4 WIN vs `oneDNN`, `1.04x–1.22x`) & `Softmax F32` (4/4 WIN, `1.58x–3.55x` vs `oneDNN`)**: `1x32768x2560` BF16 GEMV reaches `423.03 vs 463.65 us` (**`396.76 GB/s`**, `1.10x` vs oneDNN).
+- **4-Bit (`NF4`/`INT4Sym`) `BK=gs=64` Zero-Branch `dpasw` GEMM (`512x4096x4096`, `errors=0`)**: **`22.49 TFLOPS` (`NF4`) / `24.57 TFLOPS` (`INT4Sym`)** (`12.95x` faster vs initial 8 B-strided + dynamic LUT baseline `9886.56 us / 1.74 TFLOPS`).
+- **`bf16` Decode SDPA (`ORDER=1 + REDUCE=1`, GQA `1:1..12:1`, `BH=128, S=2048, D=128`)**: `10x`-batched L0 Regular Replay reaches **`347.75–347.79 us` (`386.0 GB/s` = `95.7%` of DRAM roof)**; `1`-shot replay hits `437.10–439.00 us`.
+
 ## Why Each Step Works
 
 ### Tiling and register reuse
