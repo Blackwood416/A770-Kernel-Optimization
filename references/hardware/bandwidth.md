@@ -1,177 +1,59 @@
-# A770 Bandwidth and Roofline Reference
+# A770 Bandwidth Ceilings and Empirical Roofline Reference
 
-Measured on Intel Arc A770 (DG2), oneAPI 2026.1, driver `32.0.101.8724`,
-Windows 11. All numbers are A770/Windows measurements; re-measure before
-transferring them to another GPU, driver, or compiler.
+> Scope: Intel Arc A770 (DG2), Windows 11, oneAPI 2026.1–2026.2, driver `32.0.101.8860` / `32.0.101.9150`. Always state the **access pattern** alongside any roofline denominator; re-measure before transferring to another GPU.
 
-> Evidence: `[MEASURED]` f32 standard-SYCL kernels over 64 B aligned USM,
-> 4096 workers, message widths 32-256 B, strides 1/16/256 float elements.
+## 1. Authoritative Bandwidth Roofs `[MEASURED]`
 
-## Contents
+Always distinguish the saturated `float4` streaming roof from narrower single-pattern benchmarks:
 
-- Environment and method
-- Measured bandwidth patterns
-- Message-width cost
-- Stride cost
-- Roofline classification
-- Rules
-- Unstable negative results
-- Reproduction
-
-## Environment and Method
-
-- f32 SYCL kernels over 64 B aligned USM: global read, global copy, global
-  reduce, and SLM read/write.
-- Each config is CPU-reference verified, warmed up, timed in a loop, and
-  recorded three times; median GB/s is reported. Configs with >5% run-to-run
-  CV are preserved as unstable.
-- Load width is the logical message width expressed with `sycl::vec`
-  loads/stores (32/64/128/256 B), not a single LSC `block_load` instruction.
-  Treat these as practical standard-SYCL ceilings, not hardware instruction
-  peaks.
-- Stride is in float elements: 1/16/256 elements = 4/64/1024 B. The stride-256
-  footprint spans 64 MiB, above the 16 MiB L2, so it represents the DRAM-like
-  regime.
-
-## Measured Bandwidth Patterns
-
-| Path | Configuration | Median GB/s | Stable |
+| Pattern / Level | Configuration | Measured Roof | Usage |
 |---|---|---:|---|
-| Strided DRAM-like global read | read, 256 B, stride 256 el | 277.0 | True |
-| Strided DRAM-like global copy | copy, 256 B, stride 256 el | 328.8 | True |
-| Strided DRAM-like global reduce | reduce, 256 B, stride 256 el | 273.4 | True |
-| L2-resident global read | read, 256 B, stride 1 el | 854.6 | True |
-| L2-resident global copy | copy, 256 B, stride 1 el | 1300.9 | True |
-| SLM read | 256 B messages | 4115.8 | True |
-| SLM write | 256 B messages | 5413.4 | False |
+| **DRAM Read (default roof)** | `512 MiB`, `float4`/lane, `8` in-flight, `WG=256` | **`403.1 GB/s`** (`417.2 GB/s` at `4` in-flight) | **Primary denominator for Domain I streaming kernels** (GEMV, RMSNorm, Softmax, SDPA) |
+| **DRAM Write** | `512 MiB` store, same shape | **`464.6 GB/s`** | Store-heavy kernels (`+15%` above read because read is latency-limited) |
+| **L3 (L2) Read** | `8 MiB` resident, `reps=512` | **`3,429.8 GB/s`** | L3-resident tile denominator (short `~160 us` kernels drop to `~1,650 GB/s`) |
+| **SLM Read (practical GEMM wall)** | `256-GRF` / `oneDNN` GEMM (VTune `full-compute`) | **`3.29–3.77 TB/s`** | Practical XMX operand feeding ceiling (microbenchmark `256 B` read peaks at `4.12 TB/s`) |
+| `B_DRAM_contiguous` (256 B-msg SYCL) | `256 MiB` contiguous, logical `256 B` `sycl::vec` | `291.1 GB/s` read / `340.0 GB/s` copy | **Narrower pattern only** -- quoting `291.1 GB/s` under a `float4` kernel understates utilization by `~38%` |
+| `B_DRAM_strided` (256 B-msg, 1 KB stride) | `64 MiB`, stride `256` floats (`1024 B`) | `277.0 GB/s` read / `328.8 GB/s` copy | Strided DRAM-like baseline (`copy` counts read + write bytes combined) |
 
-Copy GB/s counts read plus write bytes (the benchmark doubles the source
-payload), so `328.8 GB/s` is already the aggregate bidirectional traffic; do
-not double it again.
+## 2. Message Width and Stride Penalties `[MEASURED]`
 
-`277 GB/s` is a strided-pattern effective bandwidth (`B_DRAM_strided`), not a
-universal hardware DRAM ceiling. A dedicated contiguous streaming campaign on
-the current Windows/oneAPI stack (driver `32.0.101.8860`) measured
-`B_DRAM_contiguous` at `291.1 GB/s` read, `340.0 GB/s` copy, and `290.6 GB/s`
-reduce (256 MiB source, 256 B messages, 3 repeats x 20 samples, CV below 5%).
-Use the pattern names
-`B_DRAM_contiguous`, `B_DRAM_strided`, `B_L2_reuse`, and `B_SLM` when choosing
-a roofline model.
+Measured with logical `sycl::vec` loads/stores over `64 B`-aligned USM (`f32`, `4,096` workers):
 
-### Saturated float4 read/write roof (P5, 2026-11)
-
-`[MEASURED]` A float4 grid-stride kernel with enough outstanding requests measures a **higher** read
-roof than the 256 B-message campaign above, on the same card:
-
-| Kind | Configuration | GB/s (two runs) |
-|---|---|---:|
-| DRAM read | 512 MiB (32x the 16 MB L2), float4 per lane, 8 requests in flight, wg=256 | **403.1 / 400.0** |
-| DRAM write | 512 MiB store, same shape | **455.4 / 464.6** |
-| L2 read | 8 MiB resident, reps=512 | **3414.0 / 3429.8** |
-| L2 read, short kernel | 8 MiB, reps=32 (one launch ≈ 160 us) | 1650.4 / 1598.8 |
-| DRAM read, 4 in flight | 512 MiB, inflight=4 | **417.2 / 415.7** |
-
-Three things to take from this table:
-
-1. `291.1 GB/s` is a **256 B-message** contiguous-read number, not the roof of a float4 grid; the
-   gap to 403.1 is outstanding-request depth, not clocks. Say which pattern you mean — quoting 291
-   under a float4 kernel understates its bandwidth utilisation by ~38 %.
-2. **Write exceeds read** here (464.6 vs 403.1, 15 %): this is a read-latency-limited result, so do
-   not treat the read column as a hard ceiling for a store-heavy kernel.
-3. Shrinking the kernel until the launch dominates destroys the number (reps=32 gives 48 % of the
-   reps=512 rate), and more requests in flight is not automatically better — 4 beat 8 in both runs,
-   so sweep it instead of asserting it.
-
-Artifact: `probes/087-roof/work/roof.csv` in the Arc-ISA-Research repo (kernel `stream.cpp`, one
-row per kind/run with its `note` column carrying warmup/samples/inflight).
-
-## Message Width Cost (stride 256 el = 1024 B)
-
-| Load width B | read GB/s | copy GB/s | reduce GB/s |
+| Load Width (at `1024 B` stride) | Read GB/s | Copy GB/s | Reduce GB/s |
 |---:|---:|---:|---:|
-| 32 | 104.0 | 67.9 | 100.1 |
-| 64 | 206.1 | 247.7 | 203.3 |
-| 128 | 225.7 | 270.9 | 226.9 |
-| 256 | 277.0 | 328.8 | 273.4 |
+| `32 B` | `104.0` | `67.9` | `100.1` |
+| `64 B` | `206.1` | `247.7` | `203.3` |
+| `128 B` | `225.7` | `270.9` | `226.9` |
+| `256 B` | **`277.0`** | **`328.8`** | **`273.4`** |
 
-## Stride Cost (256 B load width)
+| Stride (at `256 B` width) | Stride Bytes | Read GB/s | Copy GB/s | Notes |
+|---:|---:|---:|---:|---|
+| `1` float | `4 B` | `854.6` | `1,300.9` | L3-resident contiguous (`B_L2_reuse` SYCL ceiling) |
+| `16` floats | `64 B` | `536.4` | `764.1` | Partial cache-line utilization |
+| `256` floats | `1,024 B` | `277.0` | `328.8` | Drops to `~32%` of stride-1 rate |
 
-| Stride el | Stride bytes | read GB/s | copy GB/s | reduce GB/s |
-|---:|---:|---:|---:|---:|
-| 1 | 4 | 854.6 | 1300.9 | 841.4 |
-| 16 | 64 | 536.4 | 764.1 | 533.5 |
-| 256 | 1024 | 277.0 | 328.8 | 273.4 |
+## 3. Compute Ceilings and Empirical Roofline Ridges `[ARCH]` `[MEASURED]`
 
-## Roofline Classification
+| Layer | Compute Peak (`bf16` XMX) | Memory Roof | Ridge Point |
+|---|---:|---:|---:|
+| Hardware theoretical (`~2.1 GHz`) | `137.63 TFLOPS` | `560 GB/s` spec | `245.8 FLOP/B` |
+| Pure `dpas.8x8` microbenchmark (`82 Gdpas/s`) | `168 TFLOPS` (instruction limit) / `100.6 TFLOPS` (verified GEMM microkernel) | `403.1 GB/s` (`float4` read) | `249.6 FLOP/B` (at `100.6 TF`) |
+| L3-resident XMX tile | `100.6 TFLOPS` | `3,429.8 GB/s` | `29.3 FLOP/B` |
 
-This is an empirical campaign roofline, not a hardware/theoretical roofline.
-Empirical ridge constants from the contiguous campaign:
+Note: Never use the `39.32 TFLOPS` FP32 vector peak as the roofline denominator for `bf16`/`f16`/`int8` XMX kernels -- it inflates the compute floor by `~4x`.
 
-- DRAM ridge: `100.6 TFLOPS / 291.1 GB/s = 345.7 FLOP/B`.
-- L2 ridge: `100.6 TFLOPS / 854.6 GB/s = 117.7 FLOP/B`.
+## 4. Two-Domain Operator Taxonomy `[MEASURED]`
 
-The older `26.2 TFLOPS / 277.0 GB/s = 94.7 FLOP/B` ridge is retained as the
-original campaign number but is not the current roofline baseline. Use the
-DRAM ridge for streaming DRAM-bound f32 kernels and the L2 ridge for
-L2-resident tiles. Full tables:
-[dram-contiguous-roofline.md](dram-contiguous-roofline.md).
+Every A770 compute kernel falls into one of two cleanly separated microarchitectural domains (separated by a `~60` percentage-point gap in DRAM/L3 pass-through):
 
-| Operation | FLOP/B | Achieved | Class |
-|---|---:|---|---|
-| bf16 GEMM 1024x1536x512 | 180.7 | 26.2 TFLOPS | memory-bound by the DRAM ridge; see note |
-| f32 GEMV 4096x4096 | 0.5 | 312 GB/s | memory-bound |
-| f32 RMSNorm 1024x4096 | 0.5 | 342 GB/s | memory-bound |
-| f32 Softmax 1024x4096 | 0.6 | 314 GB/s | memory-bound |
+| Domain | Operators | `XMX active` | `DRAM / L3` Pass-Through | Binding Limiter & Strategy |
+|---|---|---:|---:|---|
+| **Domain I: DRAM Stream-Through** | GEMV, RMSNorm, Softmax, Decode SDPA, Elementwise DAGs | `0.0%` | **`79%–99.5%`** | Target `403.1 GB/s` read roof (`311–401 GB/s` achieved). Use `vec16` / `float4` coalesced loads, interleaved address streams (`SDPA_ORDER=1`), single-pass SLM staging for multi-pass row ops, and DAG fusion. |
+| **Domain II: L3-Resident XMX Matrix** | `bf16` / `int8` / `4-bit` GEMM, `SwiGLU`, Prefill SDPA | **`5%–20%+`** | **`10%–19%`** (`81%–89%` L3 hit) | Bound by instruction volume, SWSB/SBID stalls, barrier exposure, and SLM/L3 locality -- not DRAM peak. Use `GRF=256 + WG=32 + cab4`, `dpasw<8,8>`, `0-Dummy` grouping, `-Xfinalizer`, and 2D swizzle. |
 
-Class is judged against the current empirical ridges, not the superseded
-`94.7 FLOP/B` ridge. The bf16 GEMM row (`180.7 FLOP/B`) is below the DRAM
-ridge (`345.7 FLOP/B`) and above the L2 ridge (`117.7 FLOP/B`), so it is
-memory-bound by the DRAM pattern; but its achieved bandwidth is about
-`145 GB/s` (`26.2 TFLOPS / 180.7`), roughly half of `B_DRAM_contiguous`
-(`291.1 GB/s`), so the practical limit is instruction/issue rate rather than
-the bandwidth ceiling. The historical "compute-bound" label came from the old
-ridge and does not transfer to the current constants.
+## 5. Practical Rules
 
-## Rules
-
-1. Run a bandwidth microbenchmark before restructuring a kernel: if the
-   arithmetic intensity is far below the matching empirical ridge and
-   achieved bandwidth is near the access-pattern baseline (`B_DRAM_strided`
-   for strided, `B_DRAM_contiguous` for fully coalesced, `B_L2_reuse` for
-   L2-resident), stop chasing bandwidth and look at instruction volume,
-   redundant reads, and launch overhead.
-2. Wider messages win: at the 1024 B stride, 256 B loads are about `2.7x`
-   faster than 32 B loads for read and about `4.8x` faster for copy. Stage
-   global-to-SLM traffic with 256 B messages.
-3. Stride is an explicit cost: for 256 B reads, stride 256 el drops bandwidth
-   to about `32%` of the stride-1 value. Quantify transposed, padded, or
-   interleaved layouts with the microbenchmark before writing the kernel.
-4. SLM is the fastest on-chip path measured: keep repeatedly-read rows/tiles
-   in SLM, but verify with wall time because barriers and occupancy can erase
-   the SLM advantage.
-
-## Negative Results (Unstable Configs)
-
-The following configs had run-to-run CV >5% and must not be used as
-performance conclusions:
-
-- read 32/64 B at stride 1
-- copy 64 B at stride 1
-- reduce 64 B at stride 1
-- SLM write at 256 B
-
-The benchmark preserves them in `results/failures.csv` instead of deleting
-them.
-
-## Reproduction
-
-Build and run the microbenchmark with the standard oneAPI Windows commands
-in [api-usage.md](../api/api-usage.md); the benchmark reports GB/s and keeps
-unstable configs in its own failure log.
-
-The strided `277 GB/s` number must not be promoted to a universal hardware
-ceiling. The current campaign preserved both the historical stable value and
-its own unstable strided median (`287.6 GB/s`, CV above 5%) in the failure
-log; neither replaces the pattern-specific `B_DRAM_contiguous` value.
-
-Copy-ready microbenchmark core: [bandwidth read/copy/reduce cores](../api/code-snippets.md#bandwidth-read-copy-reduce-cores).
+1. **Always match the denominator to the pattern**: Judge streaming Domain I kernels against `403.1 GB/s` read / `464.6 GB/s` write; if a kernel hits `>= 85%` of `403.1 GB/s`, stop chasing bandwidth and cut redundant passes (fuse operators) or launch overhead.
+2. **Widen transfers up to `256 B` on DG2**: At `1024 B` stride, `256 B` reads beat `32 B` reads by `2.7x` vs `32 B` baseline (and `4.8x` for copy).
+3. **Sweep outstanding depth**: `4` in-flight `float4` requests (`417.2 GB/s`) beat `8` in-flight (`403.1 GB/s`) in both runs -- more in-flight requests are not automatically faster.
+4. **Ignore unstable microbenchmark cells**: Configs with run-to-run `CV > 5%` (e.g., narrow `32/64 B` stride-1 reads, `256 B` SLM writes, `1 GiB` contiguous trials) must not be promoted as roofline ceilings.

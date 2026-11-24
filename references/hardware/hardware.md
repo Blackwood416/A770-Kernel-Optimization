@@ -1,75 +1,78 @@
-# A770 (Xe-HPG / DG2) Hardware Reference
+# A770 (Xe-HPG / DG2) Hardware, Occupancy, and SLM Reference
 
-## Table of Contents
+> Scope: Intel Arc A770 (DG2-G10, PCI `0x56a0`), Windows 11, oneAPI 2026.2, driver `32.0.101.9150`. Re-measure before transferring hardware constants to any other GPU or driver.
 
-- Specs
-- DPAS / XMX constraints
-- Memory system constraints
-- GEMV notes
-- Occupancy math and measured sweet spots
-- oneDNN fastest path decode
+## 1. Terminology and Architecture Specs `[ARCH]`
 
-## Specs
+Unify naming across SYCL, ESIMD, and profiler documentation:
 
-| Spec | Value | Implication |
+- **1 Xe-core (1 DSS = 2 Subslices)** = `16 XVEs (EUs)`, `192 KB` L1 data cache, `128 KB` Shared Local Memory (SLM).
+- **Full A770 GPU** = `32 Xe-cores` = `512 XVEs` = `4,096` HW threads at `128-GRF` or `2,048` HW threads at `256-GRF`.
+- **16 MB L3 / LLC**: The shared `16 MB` last-level on-chip cache is labeled `L3` in VTune/hardware docs and `L2` in SYCL/ESIMD `cache_hint_L2` APIs. Both refer to the same `16 MB` cache.
+
+| Spec | Value | Engineering Implication |
 |---|---|---|
-| Hardware thread count | 4096 | Standard SYCL: align hardware-thread waves, not work-item counts; ESIMD occupancy is work-item-based |
-| Hardware threads per vector engine | 8 | Regular GRF mode |
-| Hardware threads per vector engine (large GRF) | 4 | Large GRF halves occupancy |
-| GRF per thread | 128 regular / 256 large | Keep register budget with headroom; 64/128 was the 16x16 GEMM sweet spot |
-| Register width | 256 bits (32 B) | A float 8x8 accumulator is 256 B = 8 GRF |
-| Sub-group sizes | 8, 16, 32 reported by `info::device::sub_group_sizes` | The compiler can pick 32 even for a kernel written with a local dimension of 16 |
-| L1 per Xe-core | 192 KB | Per-subslice figure; **a single thread keeps L1 latency out to ~1 MB** - see [cache-geometry.md](cache-geometry.md) |
-| SLM per Xe-core | 128 KB | Shared local memory pool |
-| Max SLM per work-group | 64 KB | Hard per-WG cap |
-| L2 | 16 MB | A+B working set of 2.5 MB is fully L2-resident; prefetch has nothing to hide |
+| Xe-cores / XVEs | `32` Xe-cores / `512` XVEs | Work-groups dispatch round-robin across `32` Xe-cores (`gid` and `gid + 32` share L1) |
+| HW threads (`128-GRF` / `256-GRF`) | `8` / `4` per XVE (`4,096` / `2,048` total) | `256-GRF` halves thread slots (`64` HW threads/Xe-core) in exchange for `16 KB` GRF/thread |
+| Register width | `256 bits` (`32 B` / GRF) | One `8x8` fp32 DPAS accumulator occupies `8` GRFs (`256 B`) |
+| Sub-group sizes | `8, 16, 32` | Standard SYCL may choose `32` even if local dim is `16`; always query `sg.get_local_range()[0]` |
+| ESIMD max WG size | `128` work-items (`128-GRF`) / `64` (`256-GRF`) | One ESIMD work-item = 1 HW thread; `WG >= 256` never schedules and hangs silently `[BUG]` |
+| SLM per Xe-core / per WG | `128 KB` per Xe-core / `64 KB` max per WG | Hard per-WG ceiling is `64 KB`; standard SYCL `local_accessor` at `64 KB` can fail launch |
+| L1 / L3 (LLC) | `192 KB` L1 per Xe-core / `16 MB` shared L3 | Single thread maintains L1-speed latency out to `~1 MB`; see [cache-geometry.md](cache-geometry.md) |
+| PVC-only features (absent on DG2) | `load_2d`/`prefetch_2d`, `named_barrier`, `512 B` block IO | Do not use on A770 (`load_2d` hangs; `named_barrier` fails JIT; max LSC block is `256 B`) |
 
-## DPAS / XMX Constraints
+## 2. GRF Modes, Work-Group Sizing, and SLM Co-Residency Matrix `[ARCH]` `[MEASURED]`
 
-- bf16 DPAS shape on DG2: M=8, N=8, K=16 (RepeatCount 8, SystolicDepth 8, two operations per channel). PVC differs (8x16x16), so PVC tuning advice such as the official 32x64x16 register block does not transfer directly.
-- `SystolicDepth` is fixed at 8 by `static_assert` in `dpas.hpp`.
-- DPAS `ExecutionSize=16` is allowed by the header but produces wrong results on A770 (78/128 errors); treat it as unsupported.
-- B operand must be VNNI-packed: two consecutive K rows are packed into one uint32 (`{B[2k][n], B[2k+1][n]}`). A stays row-major.
-- `dpasw` is ExecutionSize-8 only. For a 16x16 tile it emits the same number of instructions as `dpas`; it does not reduce XMX instruction count.
-- The Intel joint_matrix path used 2x2 8x8 accumulators to form a 16x16 C tile per sub-group; oneDNN's 16x8 per-thread tile cannot be reproduced in the joint_matrix path (C tile is 16x16). ESIMD can express 16x8, but it measured negative on A770 from read amplification.
+Frontend capability boundary:
 
-## Memory System Constraints
+- **Legacy OpenCL `.spv` (`ocloc` runtime recompile)**: locked to `128-GRF` (`r0..r127`). Do not plan 256-GRF kernels on OpenCL C.
+- **SYCL/ESIMD (`sycl::ext::intel::experimental::grf_size<256>`) and native Level Zero binaries**: natively execute `256-GRF` (`spill=0 B, priv=0 B`) on oneAPI 2026.2+.
 
-- DG2 `block_load` / `slm_block_load` max is 256 B; 512 B is PVC-only. Reduce message count by relayouting data, not by widening past 256 B.
-- 256 B LSC block accesses already span SLM banks. Manual SLM bank padding broke 256 B alignment and measured negative.
-- `load_2d` / `prefetch_2d`: PVC-only. A770 hangs; bf16 `Transposed` is rejected at compile time (only u32/u64).
-- `named_barrier`: PVC-only.
-- L2 is 16 MB. Use walk order (N-first) so adjacent work-groups share A/B tiles already in L2.
+Use this residency matrix to size SLM and work-groups without contradicting mode assumptions:
 
-## GEMV Notes (f32, 4096x4096, row-major A)
+| GRF Mode | HW Threads / Xe-core | Recommended ESIMD WG | WGs / Xe-core | Safe SLM / WG | Typical Use Case |
+|---|---:|---:|---:|---:|---|
+| `128-GRF` | `128` | `WG=128` | `1` (full Xe-core) | `<= 56–64 KB` | Single-wave medium GEMM (`BM=256 BN=192 BK=32/64`, `57,344 B` SLM) |
+| `128-GRF` | `128` | `WG=32` | `4` | `<= 32 KB` | Standard SYCL / small-tile ESIMD (`> 32 KB` loses resident WGs) |
+| `256-GRF` | `64` | **`WG=32`** | **`2` (64/64 threads)** | **`<= 48 KB` (`49,152 B`)** | **Production large GEMM** (`cab4`: `4 x 12 KB = 48 KB`, `92.5 TFLOPS`) |
+| `256-GRF` | `64` | `WG=48` or `WG=64` | `1` | `<= 64 KB` | Avoid on RowMajor GEMM (1 WG/Xe-core stalls at barriers; `452 us` vs `290–300 us` at `WG=32 / 48 KB` `[MEASURED]`) |
 
-- GEMV is memory-bound on A770: 64 MB of A plus a 16 KB x vector per launch. x fits in L2 and L1, so a cooperative SLM relay of x was slightly negative (0.229 ms vs 0.215 ms for direct L2 reads).
-- Best measured standard-SYCL structure: 2D `nd_range`, one row per sub-group, `vec<float,16>` loads, per-lane trip count derived from the actual sub-group size, scalar `reduce_over_group`, 512-thread work-groups. Stable at about 0.215 ms.
-- Same-operation library baselines on the same machine, device-time median with the unified protocol: oneMKL GPU gemv `transpose::trans` 0.166 ms, oneDNN GPU matmul `Kx1` `jit:gemm:any` 0.456 ms. The older 0.329 / 0.380 ms numbers were wall-time based and are superseded; see the ladder in [techniques.md](../techniques/techniques.md) for the full table. oneDNN `1xK` at 0.182 ms is `x*A` (`A^T*x`), not row-major `A*x`, and its output did not match the reference.
-- VTune instruction-count mix for the 0.215 ms kernel: about 3.9M instructions/kernel, Int32/SP Float 61%, Other 18.8%, Send 13.7%, Control Flow 4.5%, Synchronization 1.7%, SIMD utilization 96.9%. The remaining cost is vector FMA plus reduction, not global bandwidth or address math.
+## 3. Occupancy and XMX Saturation `[MEASURED]`
 
-## Occupancy Math and Measured Sweet Spots
+Measured by scaling a fixed `512`-op `dpas.8x8` body across thread counts:
 
-- Standard SYCL mapping: a work-item is a SIMD lane, a sub-group is one SIMD
-  hardware thread, and `HW threads per WG = WG_size / SG_size`. For full
-  waves, align `WG_count * WG_size / SG_size` to 4096, not
-  `WG_count * WG_size`. The compiler may pick SG=32 even when the kernel was
-  written for 16.
-- ESIMD mapping: an ESIMD work-item explicitly owns a SIMD vector, so do not
-  reuse standard-SYCL occupancy arithmetic blindly. Count ESIMD work-items
-  and confirm with VTune occupancy.
-- Measured joint_matrix geometry (standard SYCL): BM=128, BN=64, BK=16,
-  512-thread work-group, GRF usage about 64/128; 24 full waves was the best
-  measured geometry with the actual sub-group mapping.
-- Measured ESIMD geometry: 32 threads/work-group x 16x16 per-thread C tile,
-  A 2x8 KB + B 2x4 KB SLM (24 KB total).
-- With A read directly from global, 4-buffer B SLM (16 KB) and one barrier per 2 K blocks was best.
-- SLM per work-group above about 32 KB starts losing resident work-groups (8-buffer B at 32 KB measured negative).
-- Higher occupancy is not the goal by itself: oneDNN ran at 28.7% occupancy and beat an ESIMD variant at 58.4% because it issued fewer instructions.
+| Hardware Threads | Added Device Time | Aggregate Rate | Regime |
+|---:|---:|---:|---|
+| `128` | `5.0 us` | `13.1 Gdpas/s` | Latency-bound (`~10.7 ns`/dpas single-chain floor) |
+| `512` | `9.9 us` | `26.5 Gdpas/s` | Filling XVEs |
+| `2,048` | `22.6 us` | `46.4 Gdpas/s` | Near saturation |
+| `4,096` | `25.6 us` | **`81.9 Gdpas/s`** | **Issue-rate plateau** (`~6.3 ns` = `~12.5–13 cycles` per `dpas.8x8` per EU) |
 
-## oneDNN Fastest Path Decode
+Occupancy rules:
 
-- Entry gates in `jit_xe_hp_systolic.cpp`: `mayiuse_ngen_kernels()` and `mayiuse_large_grf_mode()`. A770 XMX GEMM is ngen code generation + Large GRF, not SYCL joint matrix.
-- No-copy path when `M <= 1024 || N <= 1024`: no extra A/B packing kernel; the gemmstone kernel reads A/B layouts directly.
-- Tuned configuration: SIMD8 threads, GRF 256 (4 threads/EU), 64 HW threads/work-group, work-group tile 128x64, per-thread C 16x8, K block 32, 48 KB SLM, 4 SLM buffers + 2 GRF copies, barrier per 32K, Boustrophedon walk via fused linear ID.
-- The remaining 1.11x gap between our best ESIMD kernel and oneDNN is instruction volume from the A/B SLM relay plus ngen-level scheduling (DPASW chains, SWSB), which SYCL/ESIMD cannot express.
+1. **Compute hardware threads first**: For standard SYCL, `hw_threads = WG_count * (WG_size / SG_size)`. For ESIMD, `hw_threads = total_work_items`.
+2. **ILP vs occupancy**: For scalar/vector FMA bodies (`128-GRF`), below `ILP=8` add threads first; at `ILP >= 8`, latency is hidden and capping ILP at `8–16` avoids spills. For XMX `dpas`, adding per-thread ILP does **not** raise the `~82 Gdpas/s` plateau; filling more XVEs and removing wave quantization matter more.
+3. **Accumulator GRF ceiling (`256-GRF`)**: Keep DPAS accumulators `<= 128 GRF` (e.g., `acc[4][4]` = `16 x 8 = 128 GRF`, zero spills). Expanding to `acc[4][6]` (`192 GRF`) exhausts staging/pointer registers and emits `35–67` main-loop `send.dc0` scratch spills `[MEASURED]`.
+4. **Higher occupancy is not automatically faster**: Lower instruction volume and better latency hiding beat raw occupancy (e.g., `256-GRF` `WG=32` at 50% max thread slots beats `128-GRF` at higher slot utilization).
+
+## 4. SLM Banking, Alignment, and Bandwidth Wall `[MEASURED]`
+
+### 4.1 Read-Side Stride Behaviour (`4 B` word reads, full occupancy)
+
+| Per-Lane Stride | Cost vs Stride 1 (`4 B`) | Reading |
+|---|---:|---|
+| `0 B` (broadcast) | **`0.69x`** (`43.8 ns`) | Hardware merges same-address reads; never spread out broadcasts |
+| `4 B` (consecutive) | `1.00x` (`63.7 ns`) | Baseline |
+| `8 B` / `12 B` / `16 B` / `132 B` | `0.85x–0.91x` | Odd strides and `8 B` spacing beat contiguous `4 B` |
+| `64 B` / `192 B` | `1.25x` (`79.6 ns`) | First bank-conflict tier |
+| `128 B` / `384 B` | `1.67x` (`106.4 ns`) | Second bank-conflict tier |
+| **`256 B`** | **`3.29x` (`209.6 ns`)** | **Severe conflict cliff**; avoid all `64 B`-multiple lane strides |
+
+There is no classic 32-bank x 4-byte conflict cliff on DG2. Pad transposed/column-major SLM pitches by one element (odd stride) only when lane strides hit `64 B` multiples; do **not** pad `256 B` LSC block loads (they already span banks and padding breaks alignment).
+
+### 4.2 Write-Side Banking, `16 B` Alignment Trap, and Read Wall
+
+1. **Write-side `256 B` 8-way conflict**: `esimd::slm_scatter` with a `256 B` stride (`0 mod 128 B`) triggers an 8-way SLM store bank conflict (`mov` count jumps `143 -> 218`, slowing `4096^3` GEMM by `+79 us` `[MEASURED]`).
+2. **Coalesced `4x64 B` writes (`store.slm.d64x8t`)**: Packing adjacent `uint16_t` pairs into `4x64 B` block writes + `1x128 B` A store cuts per-`BK=16` `store.slm` ops from `9` to `5`, reducing SLM write traffic by `24%–31%` and freeing SBID tokens `[MEASURED]`.
+3. **Hard `16 B` (OWord) alignment on `slm_block_store` `[BUG]` `[CORRECTNESS]`**: Passing an `8 B`-aligned offset (e.g., `slm_block_store<uint32_t, 2>`) does not error -- hardware silently truncates down to `16 B` and overwrites adjacent entries. Always align offsets to `16 B` and use `slm_block_store<uint32_t, 4>` or wider.
+4. **SLM read bandwidth wall**: Practical/peak SLM read throughput on GEMM kernels sits at **`3.29–3.77 TB/s`** (VTune `full-compute` `[MEASURED]`). Near `3.3+ TB/s`, increase M/N reuse per loaded SLM byte (or use `dpasw` to halve A reads) rather than micro-tuning load instructions.

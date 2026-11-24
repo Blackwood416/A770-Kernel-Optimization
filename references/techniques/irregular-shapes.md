@@ -1,130 +1,51 @@
-# Irregular Shapes and Sparse GEMM on A770
+# Irregular Shapes, Sparse GEMM, and Direct Convolution on A770
 
-Measured on Intel Arc A770, oneAPI 2026.1, Level-Zero, f32 64 B aligned USM.
+> Scope: Intel Arc A770 (DG2), Windows 11, oneAPI 2026.1–2026.2, `f32`, `64 B`-aligned USM. Rules are `[HEURISTIC]` outside the measured shapes below; re-measure before generalizing.
 
-> Evidence: `[MEASURED]` f32 softmax rows=64 cols 256-4096; GEMV M=64/M=96
-> cols 256-4096; sparse GEMM `M=K=512, N=8`. The sparse and fallback rules
-> are `[HEURISTIC]` outside these domains.
+## 1. Alignment Gates and Odd-Shape Fallbacks `[MEASURED]`
 
-## Contents
+### 1.1 Softmax (`rows=64, cols in 256..4096`)
 
-- Softmax shape cost
-- GEMV-N1 shape cost
-- Gather/scatter
-- Sparse GEMM
-- Negative results
-- Reproduction
-
-## Softmax Shape Cost
-
-Rows fixed at 64. `fast` is the 64 B aligned `vec<float,16>` SLM path,
-`fallback` is the scalar-chunk SLM path, `naive` is one work-item per row.
-oneDNN uses `softmax_accurate`, axis=1. Times are wall-time means per run:
-100 warmup + 1000 timed launches with `q.wait()`, repeated 3 times.
-
-| cols | fast vec | fallback scalar | naive row | oneDNN |
+| `cols` | Fast `vec16` SLM (`us`) | Scalar-Chunk SLM (`us`) | Naive Row (`us`) | `oneDNN` (`us`) |
 |---:|---:|---:|---:|---:|
-| 256 | 17.827 | 14.708 | 136.027 | 28.307 |
-| 512 | 10.513 | 15.152 | 266.288 | 14.145 |
-| 1024 | 15.413 | 24.901 | 557.034 | 23.360 |
-| 1025 | N/A | 18.039 | 1099.013 | 18.362 |
-| 2048 | 11.522 | 23.500 | 1103.938 | 35.781 |
-| 2011 | N/A | 23.302 | 2205.647 | 21.617 |
-| 4096 | 17.930 | 37.416 | 2201.133 | 31.789 |
-| 1536 runtime | 14.295 | 20.256 | 825.093 | 33.938 |
+| `256` | `17.8` | **`14.7`** | `136.0` | `28.3` |
+| `512` | **`10.5`** | `15.2` | `266.3` | `14.1` |
+| `1025` (odd) | N/A | **`18.0`** | `1099.0` | `18.4` |
+| `2011` (odd) | N/A | **`23.3`** | `2205.6` | `21.6` |
+| `4096` | **`17.9`** | `37.4` | `2201.1` | `31.8` |
 
-Rules:
+- **Gate**: Enable the `vec<float,16>` fast path only when `cols % 16 == 0 && cols >= 512` on `64 B`-aligned USM. For `cols <= 256` or odd column counts, use the **scalar-chunk SLM fallback** (matches `oneDNN` and beats naive by `60x–95x` vs naive baseline).
+- **Dynamic WG**: `16` threads for `cols <= 256`, `32` for `cols <= 1024`, `128` otherwise.
 
-1. `[HEURISTIC]` fast path only for `cols % 16 == 0 && cols >= 512`. For
-   `cols <= 256`, the vector path can be slower than fallback because
-   launch/wave overhead dominates.
-2. WG sizing: 16 threads for `cols <= 256`, 32 for `cols <= 1024`, 128
-   otherwise.
-3. Non-16-aligned or short rows use the scalar-chunk SLM fallback, never the
-   naive row-per-item kernel.
-4. Rows above 8192 cols: read max directly from global and stage only sum +
-   normalize tiles in SLM.
+### 1.2 GEMV-N1 (`M=64, f32`) -- The Non-16-Aligned Cliff
 
-## GEMV-N1 Shape Cost
+- **Fast-path gate**: Requires `M % 32 == 0 && N % 16 == 0` with `vec<float,16>` and dynamic `sg.get_local_range()[0]` trip counts (`10.9–51.4 us` for `N = 512..4096`).
+- **Severe scalar fallback penalty**: Non-16-aligned columns collapse from `16.9 us` (`N=1024`) to `586.2 us` (`N=1025`, **`34.7x` slower** vs `N=1024` baseline) and from `28.2 us` (`N=2048`) to `1159.2 us` (`N=2011`, **`41.1x` slower** vs `N=2048` baseline). Whenever odd `N` is hot, write a **vectorized body + scalar tail** (or padded buffer) instead of dropping the whole row to scalar.
+- **Gather/scatter caution**: Small arrays (`1K–2K` elements) sit at `17–20 us` (launch-bound) with no measurable random-vs-sequential gap; benchmark irregular memory with `>= 100K` elements.
 
-Default `M=64`; dynamic case `M=96, N=1536`. `fast` is sub-group-per-row with
-`vec<float,16>` and per-lane trip counts from the actual sub-group size.
-oneDNN baseline is `Kx1` matmul, verified against the CPU reference.
-Times are wall-time means per run: 100 warmup + 1000 timed launches with
-`q.wait()`, repeated 3 times. Device/pipeline medians were not recorded in
-this campaign and must not be mixed with SYCL-event tables.
+## 2. Sparse GEMM (`M=K=512, N=8, f32`) `[MEASURED]` `[HEURISTIC]`
 
-| cols | fast vec16 | scalar row | oneDNN Kx1 |
-|---:|---:|---:|---:|
-| 256 | 12.609 | 49.162 | 37.215 |
-| 512 | 10.919 | 93.486 | 37.562 |
-| 1024 | 16.895 | 183.849 | 33.812 |
-| 1025 | N/A | 586.166 | 23.845 |
-| 2048 | 28.239 | 355.590 | 42.048 |
-| 2011 | N/A | 1159.231 | 58.487 |
-| 4096 | 51.445 | 709.487 | 40.890 |
-| 1536 runtime | 24.702 | 268.388 | 42.696 |
-
-Rules:
-
-1. `[HEURISTIC]` GEMV-N1 fast path requires `M % 32 == 0 && N % 16 == 0`;
-   never hardcode a 16-lane per-lane trip count because A770 may compile with
-   32-lane sub-groups.
-2. `[MEASURED]` f32 M=64 on A770: N=1025 is about `34.7x` slower than N=1024
-   and N=2011 is about `41.1x` slower than N=2048. Re-measure for other M/N
-   before reuse. If such shapes are common, add a padded/tail-vector fast
-   path instead of staying scalar.
-
-## Gather / Scatter
-
-At lengths 1024/1025/2048/2011/1536 with unique permutation indices, gather
-and scatter times sit at about 17-20 us with no repeatable random-vs-sequential
-gap. This size is launch-bound; use hundreds of thousands of elements plus
-`vec`/coalesced control variables before drawing memory-behavior conclusions.
-
-## Sparse GEMM
-
-Operator: `C[M,N] = A[M,K] * B[K,N]`, `M=K=512`, `N=8`, f32. CSR direct
-traverses nnz, dense filter scans all elements, BSR tiles use
-`vec<float,8>` multiply-add.
-
-| sparsity | CSR direct | dense filter | BSR B4 | BSR B8 | BSR B16 |
+| Sparsity | CSR Direct (`us`) | Dense Filter (`us`) | BSR `B4` (`us`) | BSR `B8` (`us`) | BSR `B16` (`us`) |
 |---:|---:|---:|---:|---:|---:|
-| 50% | 297.958 | 245.994 | 168.290 | 260.401 | 1359.107 |
-| 90% | 65.121 | 246.569 | 143.852 | 255.997 | 1359.031 |
-| 99% | 30.945 | 153.391 | 38.005 | 166.977 | 1402.758 |
+| `50%` | `298.0` | `246.0` | **`168.3`** | `260.4` | `1359.1` |
+| `90%` | **`65.1`** | `246.6` | `143.9` | `256.0` | `1359.0` |
+| `99%` | **`30.9`** | `153.4` | `38.0` | `167.0` | `1402.8` |
 
-Rules:
+- **`sparsity >= 90%`**: Use **CSR direct** traversal.
+- **`sparsity ~50%`**: Use **BSR `B4`** with `vec<float,8>` output accumulation.
+- **Occupancy trap**: Large BSR blocks (`B16` at `M=512` leaves only `32` row-block work-items) starve the GPU (`8x` slower vs `B4`); split large row blocks across work-groups. Never extrapolate `N=8` rules to large `N` without re-measuring.
 
-1. `[HEURISTIC]` (`M=K=512, N=8, f32`) `sparsity >= 90%`: CSR direct
-   traversal.
-2. `[HEURISTIC]` (`M=K=512, N=8, f32`) `sparsity ~50%`: BSR B4 with
-   `vec<float,8>` output accumulation.
-3. Dense filter is a last resort: it scans the full dense matrix even at 99%
-   sparsity.
-4. `[MEASURED]` avoid BSR tiles that leave too few work-items: at `M=512`,
-   B16 has only 32 row-block work-items and is launch-bound. Split large row
-   blocks across work-groups instead.
-5. `[CORRECTNESS]` Do not dispatch the N=8 sparse-GEMM rules to `N=4096` or
-   `80%` sparsity without a new sweep; the measured domain is only
-   `M=K=512, N=8`.
+## 3. Direct Convolution vs `im2col + GEMM` (`N=4, IC=32, 64x64, OC=64, 3x3, f32`) `[MEASURED]`
 
-## Negative Results
+| Variant | Wall Avg (`ms`) | Notes |
+|---|---:|---|
+| `onednn_conv_f32` (`convolution_direct`) | **`0.0935`** | Strongest library baseline |
+| `direct_nhwc_cacheblock_oc64` | **`0.1605`** | Best custom SYCL (`[KH][KW][IC][OC]` weights, full `OC=64` cache block) |
+| `direct_nchw_naive` | `0.2234` | Baseline NCHW |
+| `direct_nhwc_cacheblock_oc16` | `0.2976` | Smaller OC block cuts input reuse (`1.85x` slower vs `oc64`) |
+| `im2col_gemm_tile32` | `0.3330` | Beats `tile64` (`2.33 ms`, SLM/occupancy loss), still trails OC64 direct |
+| `direct_nhwc_naive` | `1.3352` | **`~6x` slower vs NCHW direct** without OC blocking & HWIO weights |
 
-- Non-16-aligned GEMV fallback is the largest gap at the measured f32 M=64
-  pairs: N=1025 is 34.7x slower than N=1024 and N=2011 is 41.1x slower than
-  N=2048.
-- BSR B16 at M=512 is launch-bound with only 32 row-block work-items and is
-  not a fair tile-size comparison.
-- At the tested gather/scatter lengths (~1-2K), there is no repeatable
-  random-vs-sequential gap; the measurements are launch-bound and do not yet
-  characterize irregular memory behavior.
-
-## Reproduction
-
-Build and run the shape/fallback/sparse benchmarks with the standard oneAPI
-Windows commands in [api-usage.md](../api/api-usage.md).
-
-Copy-ready cores: [softmax fast/fallback](../api/code-snippets.md#softmax-fast-fallback-cores),
-[GEMV fast core](../api/code-snippets.md#gemv-fast-core),
-[sparse CSR/BSR cores](../api/code-snippets.md#sparse-csr-bsr-cores).
+**Rules & correctness traps**:
+1. Default to `oneDNN` for `f32` conv; if writing custom NHWC conv, pair **`OC` cache blocking** with **`[KH][KW][IC][OC]`** weight layout.
+2. In `im2col + GEMM`, the GEMM width is `OC` (not batch `N`) and `K = KH * KW * IC`; output channel stride is `OC` for both NCHW and NHWC outputs `[CORRECTNESS]`.

@@ -1,158 +1,57 @@
-# SWSB (scoreboard) on DG2 (XeHPG) — Encoding, Traps, Measured Cost
+# SWSB (Scoreboard), Barriers, Fences, and GRF Banks on DG2
 
-**Scope**: Intel Arc A770 (DG2 / XeHPG), driver IGC `32.0.101.9150`, offline IGA
-`1.1.0-640a706f`. Facts come from an IGA legality matrix over 71 candidate annotations
-(`probes/020-swsb/legality.csv`) plus 10 whole-kernel variants executed on the A770
-(`probes/020-swsb/results-*.csv`).
+> Scope: Intel Arc A770 (DG2 / Xe-HPG), Windows 11, oneAPI 2026.2, driver `32.0.101.9150`.
 
-This page matters for two reasons: SWSB is **functionally required** (a stream with no
-dependencies can fail to complete), and it is a **first-class performance resource** (starving the
-token pool costs 33%).
+## 1. SWSB Hardware Model and Budget `[ISA]` `[MEASURED]`
 
-## 1. Encoding
+DG2 uses the `ThreeDistPipe` software scoreboard encoded in byte 1 of every instruction:
 
-| Item | Value | Label |
-|---|---|---|
-| Model | `ThreeDistPipe` — 16 scoreboard tokens, maximum register distance 7 | [ISA] |
-| Field location | instruction byte 1, same for 8 B and 16 B forms (not part of the opcode word) | [ISA] |
-| Verbatim encodings | `{@1}`=0x01, `{A@1}`=0x09, `{F@1}`=0x11, `{I@1}`=0x19, `{L@1}`=0x51, `{$0}`=0x40, `{$0.dst}`=0x20, `{$0.src}`=0x30, `{@1,$0.dst}`=0x90 | [ISA] |
-| Combination rule | a distance and a token combine only in the **class-matching** forms: `{@n,$m.dst}` for normal ALU, `{A@n,$m}` for send, `{@n,$m}` for math/DPAS. Everything else is `invalid SWSB`. All three combined forms use the same packed field `0x80|(n<<4)|m` (m=0 gives 0x90) | [ISA] |
-| `sync` | only `nop`, `allrd`, `allwr`, `bar`, `host` exist. `sync.all` / `sync.sb` / `sync.thread` do not exist in IGA; `sync.grfsb` has a hardware encoding (1) that the assembler cannot express | [ISA] |
-| Dependency reporting | `iga64 -Xprint-defs` / `-Xprint-deps` report register def/use sets only; they do **not** resolve `$n` to the producing instruction, so a hand-written schedule must be reasoned about from the encodings | [TOOLCHAIN] |
+- **16 architectural SBID tokens (`$0..$15`)** per HW thread, shared across all out-of-order `send.ugm`, `send.slm`, `send.gtwy`, and `dpas`/`dpasw` instructions.
+- **In-order register distance `0..7`** (`{@1}..{@7}` or per-pipe `A`/`F`/`I`/`L`).
+- **Class-matching combined encodings**: normal ALU uses `{@n,$m.dst}`, math/DPAS uses `{@n,$m}`, send uses `{A@n,$m}`.
+- **Silent IGA traps `[BUG]`**: `{$n.inc}` assembles silently to `0x00` (no-op) and `{$16}` folds silently to `0x50` (invalid token). Stripping dependencies hangs kernels (`CL_OUT_OF_RESOURCES`, no TDR).
+- **Token starvation cost**: Collapsing distinct producer tokens onto one ID regresses even simple memory kernels by **`+33%`** vs distinct-token baseline `[MEASURED]`.
 
-## 2. Silent traps `[BUG]`
+## 2. 16-SBID Saturation, Short UGM Waits, and SLM Address Chains `[MEASURED]`
 
-- `{$0.inc}` assembles to **0x00** — IGA's `assert(0)` is compiled out, so the no-dependency
-  annotation is silently dropped.
-- `{$16}` assembles to **0x50** (`REG_DIST_LONG | 0`) because the range check is
-  `sbid > getMaxSWSBTokenNum()` with max 16 — an off-by-one that turns token 16 into "no token".
-- `$17..$31` are correctly rejected.
-- Neither of the first two produces any warning; both quietly invalidate a schedule.
+In deep ESIMD GEMM loops (`cab4` / `GRF=256`), the 16-token pool is a primary performance wall:
 
-## 3. Measured cost (axpy, n=4096, 200 launches)
+1. **`Short UGM waits (<120 ins)` correlate strictly monotonically with runtime**:
+   - When simultaneous in-flight `send.ugm + send.slm` exceeds `~14`, IGC's token allocator steals the oldest in-flight UGM SBID, forcing premature `sync.nop` / `sync.allwr` stalls before DRAM loads return.
+   - Measured across `4096^3` `bf16` GEMM schedules: **`1 -> 5 -> 7 -> 9 -> 11` Short UGM waits (<120 ins) correspond directly to `1486 -> 1552 -> 1600 -> 1703 us`** (`1` wait is `14.6%` faster vs `11` waits `[MEASURED]`).
+   - **2-iteration wrap-around audit**: Because UGM loads issued near the end of an unrolled loop iteration are consumed at the top of the next iteration, statically scan **two wrapped iterations across the backward `goto`/`jmpi`** and target **`Short UGM waits <= 1`** and **`sync.allrd == 0`**.
+2. **Sparsely interleave UGM loads**: Merge `B` loads (`128 B` `d64x16t` halves SBIDs), coalesce SLM writes (`4x64 B`), and avoid bursting global loads back-to-back. Never pre-issue next-step `slm_block_load` into a tail already crowded with global UGM loads (`Btile192` regressed to `337 us` from 16-SBID saturation `[MEASURED]`).
+3. **SLM address GRF reuse chains (`SLM addr chains`)**: Deep loops with ~60 SLM offsets exhaust free address GRFs, causing IGC to reuse one address register across consecutive `load.slm`/`store.slm` ops (`{$X.src}` + `{A@1}`). Interleaving `load_slm_ops` with `store_buf` cuts `SLM ld addr chains` from **`45/48` to `8/48`** (`2048x4096x2048` `382 -> 377.4 us` `[MEASURED]`).
+4. **`-Xfinalizer` SWSB leverage**: Passing `-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR` to ESIMD VC lets non-overlapping `dpasw` macros share SBIDs and prunes redundant waits (`sync.allrd 5 -> 0`, `Short UGM waits 5 -> 1`, `sync.nop 34 -> 23` `[MEASURED]`).
 
-| Variant | dev µs (median) | wrong elements | Reading |
-|---|---|---|---|
-| baseline (byte-identical to driver binary) | 4.2 | 0 | control |
-| all token ids collapsed to `$0` | **5.6** | 0 | **token starvation costs +33%** |
-| 29 extra `sync.nop` inserted | 4.3 | 0 | sync slots are nearly free (+2%, in the noise) |
-| all `sync.nop` deleted | 4.2 | 3936 | races, no speedup |
-| one coarse `sync.allrd` replacing two fine waits | 4.2 | 4032 | the wait sets are **not** equivalent |
-| every register distance +3 | 4.2 | 2784 | distance is not a simple "≥ producer gap" |
-| **all tokens/distances stripped** | — | — | **kernel never completes: `CL_OUT_OF_RESOURCES`** |
-| **every distance pinned to 7** | — | — | **kernel never completes: `CL_OUT_OF_RESOURCES`** |
+## 3. Calibrated Hardware Latencies vs Compiler Model `[MEASURED]`
 
-Labels: all rows `[MEASURED]`.
+vISA's built-in latency model underestimates actual DG2 dependent-chain hardware latency by `2x–5x`:
 
-Takeaways:
+| Instruction Class | Measured Hardware Latency | Compiler Model | Recommended SWSB / ILP Guidance |
+|---|---:|---:|---|
+| `mad` (FMA) | `~9.2 ns` (`~22 cycles`) | `10 cycles` | Knee at **`8` independent chains** (`16` adds only `7%`) |
+| `math.exp` | `~32.4 ns` (`~78 cycles`) | `17 cycles` | Hide with `~12` independent lanes; throughput is cheap (`~3.3 cycles/EU`) |
+| `1 / (v + b)` | `~21.1 ns` (`~51 cycles`) | none (`10`) | Budget `~50 cycles` |
+| `dpas.8x8` | `>= 21 cycles` (`~12.5–13 cyc/EU` issue) | `21/22/32` | Fill XVEs; per-EU issue rate is the ceiling |
 
-- `[MEASURED]` Reallocating tokens so many producers share one id is a real 33% regression even
-  when the result stays correct — token assignment is a budget, not a hint.
-- `[MEASURED]` Stripping dependencies is not "optimization", it is a way to hang the kernel.
-  A failed dependency stream returns `CL_OUT_OF_RESOURCES` from `clFinish`; the process exits and
-  there is **no** device-level TDR event. Never treat "no bench line" as "0 µs".
-- `[MEASURED]` `sync.nop` slots are cheap on a memory-bound kernel, so "delete syncs for speed"
-  has nothing to win here.
-- `[CORRECTNESS]` A straight-line body injected into asm needs dependency anchoring: without it
-  only ~N/4+2 of the inserted operations reach the final store and the two SIMD halves disagree;
-  inserting the body **before** the original `mad` pair (which keeps the `$3.dst`/`$4.dst` chain
-  intact) makes every lane agree.
-- `[MEASURED]` The timer cannot distinguish distance-field edits at this shape — the kernel is
-  memory-bound. Price SWSB on a compute-bound base (`dpas.md` §2), not on axpy.
+## 4. Barriers, Split-Barriers, Fences, and EOT `[ISA]` `[MEASURED]`
 
-## 4. Practical rules
+DG2 has no single barrier opcode -- a work-group barrier compiles to `fence.<slm|ugm>` + gateway payload `mov`s + `send.gtwy (signal barrier)` + `sync.bar`:
 
-1. Never hand-edit away a producer's token when the consumer still needs the value; if you must
-   re-annotate, keep the class-matching form (§1) and verify by running.
-2. Budget tokens deliberately: collapse only producers that are never live at the same time.
-3. Do not rely on the assembler to reject a bad annotation (§2) — assemble, then run, then check
-   correctness, in that order.
+| Synchronization Primitive | Measured Cost (4,096 threads) | Emitted ISA / Meaning |
+|---|---:|---|
+| `group_barrier(local)` | **`~84 ns`** | `fence.slm` + `signal barrier` + `sync.bar` |
+| `group_barrier(device)` | **`~109 ns`** | `fence.ugm` + `signal barrier` + `sync.bar` (`+25 ns` device-scope premium) |
+| Single `fence.slm` / `fence.ugm` | **`~19 ns`** | Memory ordering only; does **not** synchronize threads |
+| `barrier(0)` | Execution-only | `signal barrier` + `sync.bar` with **no memory fence** |
+| `atomic_fence(acq_rel, device)` | `~98 ns` | Costlier than a full local barrier; avoid inside inner loops |
+| `send.gtwy {EOT}` (thread exit) | `~0.47 ns/WG` + `~1.54 us` floor | Launch/retire scales with WG count; **`local >= 32`** avoids `20x` tiny-WG penalty |
 
+**Split-barrier decoupling (ESIMD best practice)**: Pair `esimd::fence<local, none, group>()` + `exp_esimd::split_barrier<signal>()` + `split_barrier<wait>()` with `cab4` 4-buffer circular SLM so uninterrupted `dpasw` compute runs cleanly separated from barrier rendezvous. Never hand-inject raw gateway barriers in asm (`8/8` deadlock `[BUG]`).
 
-## DG2 byte-level SWSB encoding `[ISA]` `[MEASURED]`
+## 5. GRF Register Banks and Operand Regions `[ISA]` `[MEASURED]`
 
-On A770 the whole SWSB annotation lives in byte 1 of the instruction (ThreeDistPipe). Verified by
-assembling one variant per annotation with `iga64 -a -p XeHPG` and reading the byte back:
-
-| written | byte1 | meaning |
-|---|---|---|
-| (nothing) | `00` | no dependency |
-| `{@1}`..`{@7}` | `01`..`07` | minimum distance, any pipe |
-| `{A@n}` / `{F@n}` / `{I@n}` / `{L@n}` | `08+n` / `10+n` / `18+n` / `50+n` | per-pipe distance |
-| `{$n.dst}` / `{$n.src}` | `20+n` / `30+n` | wait for token n on write / read |
-| `{$n}` | `40+n` | allocate / set token n |
-| `{A@n,$m}` | `80 | (n<<4) | m` | distance + token, **send only** |
-| `{@n,$m}` | `80 | (n<<4) | m` | distance + token, **math/DPAS only** |
-| `{@n,$m.dst}` | `80 | (n<<4) | m` | distance + token, **normal ALU only** |
-
-SBID is 4 bits (`$0`-`$15`), distance is 3 bits (0-7).
-
-Traps, all reproduced:
-
-* **`{$n.inc}` assembles to `00`** - the counter-increment has no encoding slot on DG2, so
-  "releasing" a token this way is a silent no-op.
-* **`{$16}` assembles to `50`** (decodes as `{L@0}`): out-of-range SBIDs fold into the prefix
-  field instead of failing. `{$255}` and `@8`/`A@8` do fail ("Invalid SWSB ID/distance number").
-* `{S@n}` and `{M@n}` are rejected ("invalid SWSB") - DG2 has only A/F/I/L. `NoAccSBSet` is
-  rejected too (Xe2+ only).
-* A distance + token combination **is** legal, but the spelling is fixed per instruction class -
-  IGA enforces this in `SWSB::verify<ThreeDistPipe>` (`iga_types_swsb.cpp:292-309`) and hardware-side
-  assembly agrees (`probes/051-swsb-token/swsb_classes.csv`, 24 combos over 4 classes):
-
-  | class | legal form | measured |
-  |---|---|---|
-  | normal ALU | `{@n,$m.dst}` | `{@1,$2.dst}` -> `0x92` (accept); `{@1,$2}` rejected |
-  | math / DPAS | `{@n,$m}` | `{@1,$2}` -> `0x92` (accept); `{A@1,$2}` rejected |
-  | send | `{A@n,$m}` | `{A@1,$2}` -> `0x92` (accept); `{@1,$2.dst}` rejected |
-
-  All three land in the same packed field `0x80|(n<<4)|m`; `@0` collapses to the plain token, and
-  `{I@n,$m}` / `{F@n,$m}` / `{L@n,$m}` do not exist in any class.
-
-Hardware check (512-mad body, n=4096): every annotation variant runs at 9.1-9.2 us, identical to
-the unannotated control, i.e. annotations are free - the cost of SWSB is the waiting, not the
-encoding. Re-setting the same token on 512 instructions without ever consuming it does **not**
-deadlock: tokens are set/overwrite, not a queue. Only waiting on a token nobody sets hangs.
-
-## Calibrating the compiler's latency model against hardware (DG2)
-
-vISA's LocalScheduler carries the compiler's idea of instruction latency
-(`sources/igc/visa/LocalScheduler/LatencyTable.h/.cpp`): `FPU = 10` cycles, `FPU_ACC = 6`,
-`DELTA = 1` per wider SIMD step, `MATH = 17` (`DELTA_MATH = 4`), and DPAS on DG2 = 21 / 22 / 32
-cycles for repeat 1 / 2 / 8. Measured on A770 with dependent chains (K = 256..2048, slope of a
-least-squares fit, 15 repeats, 2.4 GHz nominal clock; `probes/057-latency-model`):
-
-| instruction class | measured | model | model is low by |
-|---|---|---|---|
-| `mad` (fma) | 9.17 ns ≈ 22 cycles | 10 cycles | 2.2x |
-| `math.exp` | 32.4 ns ≈ 78 cycles | 17 cycles | 4.6x |
-| `1/(v+b)` | 21.1 ns ≈ 51 cycles | no EM entry (uses 10) | 5.1x |
-
-ILP sweep at fixed work (2048 mads): 1 / 2 / 4 / 8 / 16 independent chains cost
-10.22 / 5.65 / 4.83 / 3.05 / 2.85 ns per mad - the knee is at **8 chains** (16 buys only 7% more).
-
-Practical rules for hand scheduling:
-
-1. Do not size SWSB distances from the model's numbers: a mad needs ~22 cycles on hardware, so
-   `@4` (model-style `ceil(10/1)`) leaves the consumer stalling. **Use `{@8}` for ALU chains.**
-2. For transcendental chains use distance ~12 (`math.exp` ≈ 32 ns vs a 2.85 ns issue interval).
-3. Integer/float division is not in the table at all - budget ~50 cycles per `1/(v+b)` yourself.
-4. Going past 8-12 chains costs registers without buying throughput; the ILP plateau is real.
-5. The DPAS latency numbers (21/22/32) remain **unverified on hardware**: a single-work-item ESIMD
-   chain produced non-monotone device times (3.75-72.4 us across configurations, see
-   `probes/057-latency-model/dpas_chain.csv`), so only the XMX *issue rate* (~12.5-13 cycles) is
-   measured. Treat dpas latency as "at least 21 cycles, probably more".
-
-## DG2 16-SBID saturation, Short UGM waits, and SLM address GRF reuse `[MEASURED]`
-
-Verified via `zeModuleGetNativeBinary` + `ocloc disasm` across `GRF=256 cab4` BF16 GEMM variants on A770 (oneAPI 2026.2, `commit bf81332`):
-
-1. **16-SBID saturation and monotonic `Short UGM waits (<120 ins)` correlation**:
-   - DG2 has only **16 hardware SBID tokens (`$0..$15`)** per thread shared across all `send.ugm` and `send.slm` messages. When total in-flight messages exceed `~14`, IGC's `reuseTokenSelection` steals the oldest in-flight UGM token, creating **`Short UGM waits (<120 ins)`** or forcing an immediate `sync.allwr` before the first `dpasw`.
-   - Across `cab4` `4096x4096x4096` (`XL`) kernel schedules, `Short UGM waits (<120 ins)` correlates strictly monotonically with runtime: **`1 -> 5 -> 7 -> 9 -> 11` waits correspond to `1486 -> 1552 -> 1600 -> 1703 us`** (`[MEASURED]`, `1` wait is `14.6%` faster vs `11` waits).
-   - **2-iteration wrap-around disassembly audit**: Global `send.ugm` loads issued near the end of an unrolled main-loop iteration are consumed at the start of the next iteration; statically check SBID reuse/wait distance across **two consecutive iterations wrapped around** (`goto`/`jmpi` backedge) and verify `< 120 ins` stalls stay `<= 1` (with `sync.allrd == 0`).
-   - **Phase sensitivity**: Do not burst global UGM loads back-to-back; interleave them sparsely with `store.slm` and `dpasw` phases, and merge `B` loads where possible (e.g., `128 B` `d64x16t` halves SBID consumption). Never pre-issue next-step `load_slm` into a tail already crowded with global loads (causes 16-SBID saturation, regressing `Btile192` to `337 us` `[MEASURED]`).
-2. **SLM address GRF reuse chains (`SLM addr chains`)**:
-   - Deep `cab4` loops carry ~60 loop-invariant SLM offsets, exceeding free address GRFs and causing IGC to serialize multiple `load.slm` or `store.slm` operations through the same reused address GRF (`{$X.src}` + `{A@1}`).
-   - Interleaving `load_slm_ops` with `store_buf` (`store.slm` + `load.slm`) cuts `SLM ld addr chains` from **`45/48` down to `8/48`** (`wide` improves `382 -> 377.4 us` `[MEASURED]`).
-3. **`-Xfinalizer` leverage on SWSB**:
-   - Passing `-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR` to ESIMD VC allows non-overlapping `dpasw` macros to share SBIDs (`$9` / `$12`) and prunes redundant waits: **`sync.allrd 5 -> 0`**, **`Short UGM waits 5 -> 1`**, and **`sync.nop 34 -> 23`** `[MEASURED]`.
+- **Zero measured GRF bank-conflict cost on DG2**: Compute-bound 3-source `mad` loops (`K = 128..2048`) placing all three operands in one bank (`0,0,0`) vs three banks (`0,1,2`) measure byte-identical times (`4.4 / 9.2 / 28.2 us`), matching IGC's deliberate exclusion of DG2 from default BCR (`hasBankCollision()` excludes `Xe_DG2`).
+- **Rule**: Do **not** manually scramble registers or sacrifice live ranges to avoid GRF bank conflicts (note: `-twoSrcBundleBCR` is kept solely as part of the empirically verified `-Xfinalizer` 4-flag VC bundle). SLM banking (`64 B`-multiple strides) is a completely separate structure -- see [hardware.md](../hardware/hardware.md#4-slm-banking-alignment-and-bandwidth-wall-measured).
+- **Region legality (asm reference)**: 3-source (`mad`) uses `<V;H>` / `<H>` with `V in {0,1,4,8}` and `H in {0,1,2,4}`; 2-source uses `<V;W,H>`; `H=8` and `V=2` are unencodable on DG2.

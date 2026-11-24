@@ -1,151 +1,53 @@
-# Cache geometry on the A770 (DG2) `[MEASURED]`
+# Cache Geometry, Work-Group Co-Residency, and Cache Hints on A770 (DG2)
 
-Measured with `tools/cacheprobe` (pointer-chase and stride-scan microbenchmarks; kernel built from
-source at runtime so no AOT recompile interferes). Grid: one work-item for latency, 64 for
-bandwidth.
+> Scope: Intel Arc A770 (DG2), Windows 11, oneAPI 2026.1–2026.2, driver `32.0.101.9150`. Note: the shared `16 MB` last-level cache is called `L3` in hardware/VTune metrics and `L2` in SYCL/ESIMD `cache_hint_L2` APIs.
 
-## 1. Latency ladder (dependent chase, 4 KB walk stride)
+## 1. Latency Ladder and Effective Capacity `[MEASURED]`
 
-| working set | ns per access | level |
-|---|---|---|
-| 32 KB - 1 MB | 52 - 64 | L1 |
-| 2 MB - 16 MB | 118 - 142 | L2 |
-| 32 MB | 169 | transition |
-| 64 MB | 229 | mostly DRAM |
-| 128 MB | 366 | DRAM plateau |
+Measured via single-thread dependent pointer-chase (`4 KB` stride):
 
-Treat three numbers as the planning constants: **~52 ns L1, ~118-142 ns L2, ~366 ns DRAM**
+| Working Set | Latency (ns / access) | Cache Tier |
+|---|---:|---|
+| `32 KB – 1 MB` | **`52 – 64 ns`** | L1-speed (single thread stays hot out to `1 MB`, ~`5x` wider than `192 KB`/Xe-core) |
+| `2 MB – 16 MB` | **`118 – 142 ns`** | Shared `16 MB` L3 (L2) |
+| `32 MB` | `169 ns` | Transition |
+| `64 MB` | `229 ns` | Mostly DRAM |
+| `128 MB` | **`366 ns`** | DRAM plateau |
 
-## 2. Do not size tiles from "192 KB of L1"
+Planning constants: **`~52 ns` L1, `~120–142 ns` L3 (L2), `~366 ns` DRAM**.
 
-A single hardware thread keeps L1-speed latency out to a **1 MB** working set; the step to L2
-latency happens between **1 MB and 2 MB**. The commonly quoted 192 KB (per Xe-core / per subslice)
-therefore under-estimates what one thread can keep hot by roughly 5x. Conversely L2 = **16 MB** is
-confirmed: 16 MB still reads at L2 speed (142 ns) and 32 MB does not (169 ns).
+Key empirical cache behaviours:
 
-## 3. L2 bandwidth and line granularity
+- **L3 line granularity & scaling**: Stride scans over an `8 MB` L3-resident buffer saturate at `128 B` stride (`2.4 TB/s` at 64 threads; `3.43 TB/s` at full-chip `float4` grid-stride), consistent with `128 B` cache lines. Aggregate near-side capacity scales linearly with active threads (`1` thread `77.7 ns` -> `128` threads `1.6 ns/access` aggregate).
+- **Dependent-load floor (`~151 ns`)**: Pointer-chasing loops with cross-iteration address dependencies stall at `~151 ns/hop` (`~2.5x` slower than the `52 ns` L1 hit figure). Unroll independent chains or use tree/array layouts instead of linked chasing.
+- **Concurrent streaming penalty (`+16%`)**: One concurrent `64 MB` streamer adds `+16%` latency (`52.5 -> 61.2 ns`) to a hot `64 KB` chaser, and `32` streamers add only `1.0 ns` more -- bandwidth contention, not LRU cliff eviction.
+- **Associativity**: Unobservable via software timing because per-thread load serialization (`~152–157 ns`) dominates set conflicts, and VTune does not expose per-set miss counters on DG2.
 
-Stride scan over an 8 MB L2-resident buffer, 64 threads:
+## 2. DG2 32 Xe-Core Round-Robin Co-Residency and Swizzle Strategy `[ARCH]` `[MEASURED]`
 
-| stride | GB/s |
-|---|---|
-| 4 B | 632 |
-| 8 B | 996 |
-| 16 B | 1406 |
-| 32 B | 1768 |
-| 64 B | 2024 |
-| 128 B | 2187 |
-| 256 B | 2276 |
-| 512 B | 2323 |
-| 1024 B | 2396 |
+DG2 dispatches consecutive work-groups round-robin across its `32` Xe-cores. Therefore **`gid` and `gid + 32` always land on the same Xe-core and share its L1 cache**.
 
-So **L2 peak is about 2.4 TB/s** (never quote it as DRAM bandwidth - DRAM-like contiguous reads are
-in `dram-contiguous-roofline.md`), and bandwidth is essentially saturated at a **128 B stride,
-consistent with 128 B line granularity**. Narrow strides are request-rate limited, not
-bandwidth limited.
+Choose the work-group swizzle map according to the GRF/wave regime (never mix rules across regimes):
 
-## 4. Capacity scales with active threads
+1. **`256-GRF + WG=32` (`64 WGs/wave`, 2 WGs/Xe-core) -- Production GEMM `[DISPATCH]`**:
+   - **Single-wave / small grids (`total_wgs <= 64`, e.g., `512x4096x4096` = 64 WGs)**: Use **`swizzle = 1`** (linear N-first) with **both A and B set to `ca.ca`** (`L1=cached, L2=cached`) so `gid` and `gid + 32` reuse B in L1 (`206.0–206.7 us`, `1.05x` faster vs `oneDNN 3.13.2` `[MEASURED]`). Setting B to `L1=streaming` hurts single-wave grids.
+   - **Multi-wave large grids (`1024x4096x4096`, `2048x4096x2048`, `4096^3`)**: Use a **`2D 8x8 N-inner` serpentine snake walk** (`N` fast within each `8x8` block, alternating stripe direction) so co-resident WGs share `A` in L1 while spreading `B` across L3 channels.
+   - **`K >= 4096` L3 capacity cap (`swizzle <= 4`)**: On `4096^3` (`256x128` tile), `swizzle = 8` expands one wave's `A` working set to `2048 * 4096 * 2 B = 16 MB`, thrashing the `16 MB` L3. Capping **`swizzle <= 4`** saves **`-71 us`** (`1486–1495 us`, `1.10x` faster vs `oneDNN 3.13.2` `[MEASURED]`).
+2. **`128-GRF + WG=128` (`32 WGs/wave`, 1 WG/Xe-core) -- Legacy 1D M-Band Swizzle `[MEASURED]`**:
+   - 1D `SWZ=2` (`band = gid / (SWZ * GRID_N)`, `bm = band * SWZ + rem % SWZ`, `bn = rem / SWZ`) pays **only as a conjunction**: `> 1 wave` AND topological `GRID_N = N / BN >= 11` AND `total_wgs >= 32` (`+4.3% to +7.2%` vs `SWZ=1` baseline by pairing adjacent Xe-cores onto the same `bn` column, shrinking the 12-WG working set by `35%`).
+   - Under `128-GRF`, `SWZ=4` overshoots a `32`-WG wave and loses; `total_wgs < 32` with `SWZ=2` loses `-2.7% to -3.1%`.
 
-Each work-item walking its own private 96 KB region:
+## 3. LSC Cache Hint Dispatch Rules `[MEASURED]`
 
-| threads | total footprint | aggregate ns/access |
-|---|---|---|
-| 1 | 96 KB | 77.7 |
-| 16 | 1.5 MB | 7.6 |
-| 64 | 6 MB | 3.2 |
-| 128 | 12 MB | 1.6 |
+Cache hints are **not** universally neutral -- they matter whenever working sets approach L1 (`192 KB`) or L3 (`16 MB`):
 
-Aggregate cost falls almost linearly with thread count, i.e. near-side capacity/bandwidth is
-per-subslice and the L2 is shared. Budget occupancy for bandwidth the same way you budget it for
-XMX.
+| Operand / Path | Recommended Hint | ISA Code | Measured Effect |
+|---|---|---|---|
+| Pure streaming DRAM kernel (e.g., axpy) | `L1=streaming, L2=uncached` | `st.uc` | `+14%` faster vs default `ca.ca` baseline |
+| GEMM `A` loads (2D snake, shared in L1) | `L1=cached, L2=cached` | `ca.ca` | Preserves shared `A` lines across `gid` & `gid + 32` |
+| GEMM `B` loads (single-wave `total_wgs <= 64`) | `L1=cached, L2=cached` | `ca.ca` | Maximizes L1 reuse of `B` |
+| GEMM `B` loads (multi-wave 2D snake, `L1StreamB`) | **`L1=streaming, L2=cached`** | **`st.ca`** | Prevents streaming `B` from evicting shared `A` in L1 (`2048x4096x2048` `377.4 -> 373.1–374.7 us`) |
+| GEMM `C` store (standard / `Bias` / `SiLU` epilogue) | **`L1=write_back, L2=write_back`** | **`wb.wb`** | Coalesces partial writes in L1/L3 (`LMHd 128x32768x2560` **`-42 us`** vs `st.uc`; `wt.wb` regresses `+17 us` on `wide`) |
+| GEMM `C` store (`ResidualAdd` / `BiasResidualAdd`) | **`L1=streaming, L2=uncached`** | **`st.uc`** | Prevents `C` writeback from evicting hot `B`/residual in L3 (`2048x2304+BiRes` `0.98x -> 1.06x` vs `oneDNN 3.13.2`) |
 
-## 5. Dependent loads are ~2.5x slower than the ladder suggests `[MEASURED]`
-
-A chain whose next address comes from the loaded value (classic pointer chasing, linked lists,
-sparse gather) measures **~151 ns per access no matter how many lines it touches**: 150.41-152.47 ns over
-25 dependent-chase configs (4-32 lines, 128 KB-2 MB spacing) and 156.80-157.45 ns over 12 independent-load
-configs. That is ~2.5x the 52 ns L1 hit figure, so the L1/L2 "hit" numbers only apply to accesses
-the compiler could issue ahead of time. Any loop with a real cross-iteration load dependency is
-latency-bound at ~150 ns per hop: prefer restructuring (unroll + independent chains, prefetch into registers, tree instead
-of list) over micro-tuning the arithmetic.
-
-## 6. Associativity: not observable, and here is why [MEASURED]
-
-Two independent methods, 37 configurations total:
-
-* dependent chase over 4/8/16/24/32 lines at 128 KB - 2 MB spacing: **150.41-152.47 ns**, 25 configs;
-* independent loads over a fixed set of N lines (no address dependency), N = 4..48 at 128 KB and
-  1 MB spacing: **156.80-157.45 ns**, 12 configs.
-
-Both converge to the same constant, which is the tell: a thread's loads are **serialised at
-~152-157 ns per access** regardless of how many lines are in play. That floor is stronger than any
-set-conflict effect, so L2 associativity cannot be resolved by software timing on this part. Do not
-assume a low associativity (no cliff was ever seen), and do not build a loop that hopes for
-intra-thread memory-level parallelism: bandwidth has to come from thread count.
-
-## 7. Replacement behaviour: +16% the moment anyone else streams [MEASURED]
-
-Inside one launch, work-item 0 chases a hot 64 KB region while others stream 64 MB:
-
-| concurrent streamers | chaser ns/access |
-|---|---|
-| 0 | 52.54 |
-| 1 | 61.20 |
-| 4 | 60.30 |
-| 16 | 61.33 |
-| 32 | 62.20 |
-
-One streamer costs +16%, and 32 streamers (32x traffic) add only 1.0 ns more. Step-then-flat:
-bandwidth contention, not LRU eviction.
-
-## 8. Whether the fast path is per-subslice [HEURISTIC]
-
-Each work-item walking its own 1 MB region: 1 thread 83.5 ns/access, 16 threads (16 MB total) still
-10.1 ns/access aggregate. Near-side capacity clearly scales with thread count, which is consistent with
-per-subslice caches, but no subslice boundary was measured - treat 'per-subslice' as an inference.
-
-## Instrument status on this box: VTune works, but still no associativity
-
-The earlier note that VTune is unavailable is **outdated**: VTune 2026.2.0 (build 632324)
-`-collect gpu-hotspots` runs on the A770 here and produces a report with GPU Time, GPU L3 Bandwidth
-Bound, XVE Array Stalled/Idle and Occupancy (`probes/059-assoc-instrument/vtune_summary.csv`).
-For the dependent-chase and conflict workloads it reports **GPU L3 bandwidth bound 0.0-0.2% with XVE
-stalled 100%**, confirming they are latency-bound - which is exactly why timing-based conflict scans
-never show an associativity cliff.
-
-It does not expose L1/L2 hit-miss or per-set counters, so **L2 associativity remains unmeasurable**
-(instrument-level negative: dependent-chain sweeps, fixed-line-set throughput sweeps, non-dependent
-conflict loops and VTune GPU sampling have all been tried). What is needed is a GPU hardware counter
-for per-set misses (not exposed by this driver) or Intel's L2 set-index hash documentation.
-
-Per-subslice boundary, two-chaser experiment (cacheprobe mode 1, two threads, `--local 2` = one
-work-group, `--local 1` = separate work-groups):
-
-| per-chaser footprint | same work-group | separate work-groups |
-|---|---|---|
-| 24 KB | 27.21 ns | 26.26 ns |
-| 48 KB | 27.37 ns | 26.95 ns |
-| 96 KB | 29.42 ns | 29.01 ns |
-| 192 KB | 35.32 ns | 34.87 ns |
-| 384 KB | 49.77 ns | 49.38 ns |
-
-Same-work-group versus separate-work-group changes the cost by <4%, so work-group co-residency is
-**not** a usable proxy for subslice placement on this driver. The footprint curve itself (two chasers
-stay at L1 speed up to 96 KB each = 192 KB combined, then degrade) is consistent with a ~192 KB
-per-subslice budget but stays **[HEURISTIC]** - there is no counter evidence.
-
-## 9. DG2 32 Xe-Core round-robin co-residency, swizzle L3 cap, and store cache hints `[MEASURED]`
-
-Measured on A770 (`oneAPI 2026.2`, ESIMD `GRF=256 dpasw` BF16 GEMM `commit bf81332`, vs oneDNN `3.13.2`):
-
-1. **Hardware round-robin co-residency (`gid` & `gid + 32`) `[ARCH]` `[DISPATCH]`**:
-   - DG2 assigns consecutive work-groups round-robin across its `32` Xe-cores, so work-groups `gid` and `gid + 32` **always share the same Xe-core and L1 cache**.
-   - **Single-wave / small grids (`total_wgs <= 64`, e.g., `512x4096x4096` = 64 WGs)**: Use `swizzle = 1` (linear N-first) with **both `A` and `B` set to `L1=cached, L2=cached` (`ca.ca`)** so `gid` and `gid + 32` reuse `B` inside L1 (`205.95–206.72 us`, `1.05x` vs oneDNN `[MEASURED]`). Setting `B` to `L1=streaming` hurts single-wave throughput.
-   - **Multi-wave large grids (`2048x4096x2048`, `1024x4096x4096`, `4096^3`)**: Use a **`2D 8x8 N-inner` serpentine snake walk** (`N` fast within each `8x8` tile, alternating direction between stripes) so co-resident WGs share `A` in L1 while spreading `B` requests across L3 banks.
-2. **L3 working-set ceiling for `K >= 4096` (`swizzle <= 4`) `[MEASURED]`**:
-   - On `4096x4096x4096` (`256x128` tile), `swizzle = 8` inflates a single wave's `A` working set to `2048 * 4096 * 2 B = 16 MB`, colliding with the `16 MB` L3 capacity and causing thrashing. Capping `swizzle <= 4` (`1024x1024` physical square) saves **`-71 us`** (`1486.40–1495.27 us`, `1.10x` vs oneDNN `[MEASURED]`).
-3. **`L1StreamB` (`st.ca` vs `ca.ca`) `[MEASURED]`**:
-   - Under `2D N-inner` multi-wave dispatch, compile-time specializing `L1StreamB = true` to mark `B` loads as **`L1=streaming, L2=cached` (`st.ca`)** while keeping `A` as `ca.ca` protects shared `A` lines in L1 from streaming `B` eviction (`2048x4096x2048` improves `377.4 -> 373.1–374.7 us`).
-4. **Output `C` store cache-hint dispatch (`wb.wb` vs `st.uc` vs `wt.wb`) `[MEASURED]`**:
-   - **Standard / `Bias` / `SiLU` epilogue (no residual read)**: Use **`L1=write_back, L2=write_back` (`wb.wb`)**. On `LMHd (128x32768x2560)` where `C` coalesces across lines inside L3, `wb.wb` beats `st.uc` by **`-42 us`** (`414.28–415.02 us`, `1.12x` vs oneDNN), and beats `st.uc` by `-3 us` on `2048x4096x2048` (`wt.wb` regresses by `+17 us` to `391–393 us`).
-   - **`ResidualAdd` / `BiasResidualAdd` epilogue**: Keep **`L1=streaming, L2=uncached` (`st.uc`)** on `C` stores so output writeback does not evict `B` or residual buffers still hot in the `16 MB` L3 (`2048x2304+BiRes` rises from `0.98x` to `1.06x` vs oneDNN `[MEASURED]`). Avoid invalid `L1=uncached, L2=streaming`.
+Never use `L1=uncached, L2=streaming` (invalid/unsupported combination on DG2). Specialize `L1StreamB` and epilogue store hints at compile time (`if constexpr`) for zero runtime overhead.

@@ -1,134 +1,42 @@
-# Reduction and Scan Selection Reference
+# Reduction and Work-Group Scan Reference on A770
 
-Measured on Intel Arc A770, oneAPI 2026.1, driver `32.0.101.8724`. Wall
-times are 3-run averages with 20 warmup + 200 timed launches; all outputs
-pass the CPU reference. VTune uses `instruction-count`; its sampled wall
-times are inflated and only instruction mixes are compared.
+> Scope: Intel Arc A770 (DG2), Windows 11, oneAPI 2026.1–2026.2, `f32` `4096x4096` full reduction and `1M` work-group scan, verified against CPU reference (`errors=0`).
 
-> Evidence: `[MEASURED]` full reduction `4096x4096` f32 and 1M f32
-> one-element-per-lane work-group scans. WG64 and Hillis-Steele preferences
-> are `[HEURISTIC]` for other scan widths and element-per-lane counts.
+## 1. Full-Tensor Reduction (`4096x4096 f32`) `[MEASURED]`
 
-## Full-Tensor Reduction on 4096x4096 f32
+| Variant | Wall Avg | Total Instr | Takeaway |
+|---|---:|---:|---|
+| `global_atomic` (SG tree, 1 global atomic/SG = 8,192 ops) | **`0.164 ms`** | `135.9M` | **Fastest** -- few atomics hide under the 64 MB memory stream |
+| `slm_atomic` (SG tree + SLM atomic + 1 global atomic/WG) | `0.166 ms` | `176.3M` | Extra barrier & instructions with no win at 1,024 WGs |
+| `tree` (1,024 WGs, SG tree -> partials -> final tree) | `0.170 ms` | `155.2M` | Best deterministic / multi-pass choice |
+| `split_k` (16 K-splits x 64-row blocks -> final tree) | `0.175 ms` | `160.2M` | Use only when extra parallelism or per-K partials are needed |
+| `global_atomic_thread` (1 global atomic/thread = 262,144 ops) | **`0.627 ms`** | `122.9M` | **`3.8x` slower vs `tree`** despite lowest instruction count -- serializes on one address |
 
-| Variant | Avg ms | Notes |
-|---|---:|---|
-| `tree` | 0.16989 | 1024 WGs, SG tree + partials, final tree kernel |
-| `split_k` | 0.17476 | 16 K-splits x 64-row blocks, final tree |
-| `slm_atomic` | 0.16592 | SG tree, SLM atomic per WG, one global atomic per WG |
-| `global_atomic` | 0.16428 | SG tree, one global atomic per sub-group (8 per WG) |
-| `global_atomic_thread` | 0.62732 | one global atomic per thread (262144 atomics) |
-| `rmsnorm_inline` | 0.18278 | 1 WG per row, SLM row tile, 2 barriers |
+**Selection rules**:
+1. Reduce inside each sub-group first; never issue one global atomic per thread (`3.8x` contention cliff vs `tree`).
+2. Use `global_atomic` (one atomic per sub-group) for memory-bound scalar reductions when non-deterministic float order is acceptable; use `tree` for deterministic results.
+3. Always initialize every local reduction accumulator before `atomic_ref::fetch_add` (uninitialized SLM accumulators produce silent wrong sums `[CORRECTNESS]`).
 
-## Atomic Contention Evidence
+## 2. Work-Group Scan (`1M f32`, Two-Pass: Local Scan + Add-Base) `[MEASURED]`
 
-`global_atomic_thread` has the lowest instruction count (122.9M) but is about
-3.8x slower than `tree` because all threads serialize on one global address.
-The same 64 MB stream with only 8192 atomics (`global_atomic`) hides that cost
-under the memory-bound load stream. `slm_atomic` adds a local atomic, an extra
-barrier, and one global atomic per WG without a wall-time win at 1024 WGs.
-
-VTune instruction-count (main reduction kernel):
-
-| Variant | Total instr | Send | Sync | Int32 & SP Float | SIMD util |
-|---|---:|---:|---:|---:|---:|
-| `tree` | 155,160,576 | 22,424,576 | 1,998,848 | 91,072,512 | 100.0% |
-| `split_k` | 160,157,696 | 22,424,576 | 1,998,848 | 99,067,904 | 100.0% |
-| `slm_atomic` | 176,315,398 | 27,492,558 | 1,998,848 | 93,267,150 | 88.1% |
-| `global_atomic` | 135,921,664 | 18,989,056 | 999,424 | 87,949,312 | 96.9% |
-| `global_atomic_thread` | 122,929,152 | 18,989,056 | 999,424 | 82,952,192 | 100.0% |
-| `rmsnorm_inline` | 362,936,440 | 70,838,296 | 3,997,696 | 178,276,376 | 86.3% |
-
-## Work-Group Scan on 1M f32
-
-Both scans are two-pass: WG-local scan + partial sums, then a second kernel
-adds the WG base offset. Times include the scan kernel plus `add_base`.
-
-| Algorithm | WG16 | WG32 | WG64 | WG128 | WG256 | WG512 |
+| Algorithm | `WG16` | `WG32` | **`WG64`** | `WG128` | `WG256` | `WG512` |
 |---|---:|---:|---:|---:|---:|---:|
-| Hillis-Steele ms | 0.08613 | 0.06401 | 0.05593 | 0.06250 | 0.06212 | 0.06727 |
-| Blelloch ms | 0.09859 | 0.07243 | 0.06266 | 0.06602 | 0.06801 | 0.07684 |
+| **Hillis-Steele (ms)** | `0.0861` | `0.0640` | **`0.0559`** | `0.0625` | `0.0621` | `0.0673` |
+| Blelloch (ms) | `0.0986` | `0.0724` | `0.0627` | `0.0660` | `0.0680` | `0.0768` |
 
-Best measured WG size is 64. Per-work-group Sync cost grows much faster than
-the theoretical `2*log2(WG)+1`/`2*log2(WG)+3` counts because each A770 barrier
-expands into many SLM/synchronization instructions.
+**Selection rules**:
+1. **`WG=64` is the measured sweet spot** `[HEURISTIC]` for 1-element-per-lane scans; larger work-groups (`WG512`) pay sharply higher A770 barrier expansion costs.
+2. **Prefer Hillis-Steele over Blelloch** for single-element-per-lane work-group scans (fewer barriers and instructions at every WG size); reserve Blelloch for multi-element-per-lane local scans that amortize its extra phases.
 
-### Sub-group reduce (`sycl::reduce_over_group`) — check the compiled width first
+## 3. Critical Trap: `sycl::reduce_over_group` Compiled SIMD Narrowing `[BUG]` `[CORRECTNESS]`
 
-`[MEASURED]` A 32-lane `sycl::reduce_over_group` is **not** a 32-lane reduction once IGC
-narrows the kernel. At `simd_size 16` the collective is lowered to a butterfly *per SIMD pass*
-and the cross-pass merge is simply absent (no `send.slm`, no barrier, nothing in the listing that
-could move a partial sum between passes), so each lane ends up holding the sum over its own
-16-lane half. With a 128-dim head split 4 dims per lane that silently halves the QK dot product.
+A source-level 32-lane `sycl::reduce_over_group` silently produces **wrong results** if register pressure causes IGC to compile the kernel at `SIMD16` or `SIMD8`:
 
-Diagnosis, in order (all three are needed before you believe a sub-group reduce):
+- **Mechanism**: IGC lowers `reduce_over_group` to a per-SIMD-pass butterfly with **no cross-pass SLM merge** (no `send.slm`, no barrier), leaving each lane with only half (or a quarter) of the true reduction.
+- **How to detect**: Inspect `ocloc disasm` (a true 32-lane float reduction needs an `add (16|M0)` stage; narrowed SIMD16 stops at `(8|`) or check `.ze_info` (`simd_size: 32` vs `16`/`8`). Any unroll that mysteriously gets faster on a reduction kernel is suspect.
+- **Correct fix (`SDPA_REDUCE=1`)**: Stage per-lane partials into SLM (one dedicated slot per sub-group/slice), execute `it.barrier(access::fence_space::local_space)`, and read back as `float4` to sum explicitly. Works at any compiled SIMD width (`2.22x` faster than slow serial alternatives; never replace with `[[intel::reqd_sub_group_size(32)]]` which regresses **`6.6x`**, and never hand-write `select_from_group` butterflies which produced `14,559/16,384` errors `[BUG]`).
+- **API syntax traps**:
+  - Pass `it.get_group()` or `it.get_sub_group()` to `sycl::reduce_over_group` -- never pass `nd_item` (compile error).
+  - In ESIMD, `esimd::reduce` **only** matches `std::plus<>{}` / `std::multiplies<>{}`; typed `std::plus<float>{}` compiles and silently returns `0.0f` `[BUG]`.
 
-1. **Listing**: `ocloc disasm` of the AOT binary, or `simd.csv` columns counting `add (16|`,
-   `add (8|`, `send.slm`. A correct 32-lane tree needs a float `add (16|M0)` stage; at SIMD16 the
-   widest float stage is `(8|`.
-2. **`.ze_info`**: `simd_size: 32` for the good build, 16/8 for the narrowed ones. IGC picks the
-   width from register pressure, so *unrolling or prefetching more keys is what makes it narrow*.
-3. **Per-lane dump**: store each lane's intermediate state and fit the reduction over the
-   pre-reduction shares; the tell is `reduction_width` = 16 of 32 lanes with a fit residual at
-   rounding level (~1.6e-7), i.e. the partial products are right and only the merge is missing.
-
-Fixes, with measured prices on an A770 (bf16 decode, B=8 H=16 S=2048 D=128):
-
-- **Stage the shares through SLM and reduce explicitly** (one work-group barrier, then read all
-  32 back as `float4` and sum). Correct at any SIMD width, 557.06/557.26 us vs 1235.48/1235.63 us
-  for the slow-but-correct version, i.e. 2.22x. The single barrier is load-bearing and costs
-  35.31 us (ablation without it: 522 us but 2864 wrong values).
-- **Pin the width** with `[[intel::reqd_sub_group_size(32)]]`: correct, but 3705.63/3706.09 us =
-  6.6x the adopted build. Width can be pinned, throughput cannot be demanded.
-- Do **not** replace the collective with a hand-written `select_from_group` butterfly: on this
-  compiler it produced 14559/16384 wrong values, i.e. the lowering is not equivalent to a naive
-  lane^off tree.
-
-Rule: a sub-group reduction whose result feeds a numerical softmax must be validated by its
-*compiled* width, not by its source width — and a variant that gets faster when you unroll is a
-suspect, because the speed-up may be the missing merge.
-
-## Selection Rules
-
-### Reduction
-
-1. Use `tree` or `split_k` when deterministic partials, many WGs, or a second
-   pass over row/slice sums are needed.
-2. Use `global_atomic` when the reduction is memory-bound and atomics per
-   output stay small (e.g. one per sub-group). It was the fastest variant.
-3. Use `slm_atomic` only when the global atomic count is the bottleneck; at
-   1024 WGs it adds instructions and a barrier without winning.
-4. Never reduce every thread to one global address at this size;
-   `global_atomic_thread` is 3.8x slower despite fewer instructions.
-5. Keep the RMSNorm inline SLM-row pattern for row sums that feed a second
-   pass over the same row, not for bare full-tensor sums.
-6. `split_k` is not a win at 4096x4096 f32 with 1024 WGs; keep it for shapes
-   that need more parallelism or per-K-slice partials.
-
-### Scan
-
-1. `[HEURISTIC]` start with WG64 for one-element-per-lane work-group scans.
-2. `[MEASURED]` prefer Hillis-Steele for small WG scans: lower barrier and
-   instruction counts at every measured WG size.
-3. Use Blelloch only when each lane scans multiple elements locally first;
-   otherwise its `O(n log n)` work has nothing to amortize.
-4. Fewer, larger work-groups do not automatically win; barrier cost per WG
-   grows with WG size.
-
-## Negative Results
-
-- `global_atomic_thread` is 3.8x slower than tree despite having fewer
-  instructions: all threads serialize on one global address.
-- `slm_atomic` adds a local atomic, an extra barrier, and a global atomic per
-  WG without a wall-time win at 1024 WGs.
-- WG512 scans pay the largest per-work-group barrier cost; bigger work-groups
-  did not win.
-
-## Reproduction
-
-Build and run the reduction/scan benchmark with the standard oneAPI Windows
-commands in [api-usage.md](../api/api-usage.md); select variants with
-`--mode reduce` / `--mode scan`.
-
-Copy-ready cores: [reduction tree/atomic](../api/code-snippets.md#reduction-tree-atomic-cores),
-[scan Hillis-Steele/Blelloch](../api/code-snippets.md#scan-hillis-blelloch-cores).
+Copy-ready cores: [Reduction and Scan cores](../api/code-snippets.md#9-reduction-and-hillis-steele-scan-cores).

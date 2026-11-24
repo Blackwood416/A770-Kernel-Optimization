@@ -1,138 +1,43 @@
-# Weight-Only Decode GEMV-M1: INT4 / NF4 on Arc A770
+# Weight-Only Quantized GEMM and Decode GEMV (`INT4` / `NF4`) on A770
 
-GEMV-M1 operator: `y = x * W`, where `x` is bf16/f16 `[M,K]` with M in
-`{1,64}`, `W` is INT4/NF4 `[K,N]`, and `y` is f32/bf16. This is distinct from
-GEMV-N1 (`A*x`, see `gemm-shape-crossover.md`). Packed layout is `[N,K/2]`,
-low nibble first along K; scales are f16 `[G,N]`; INT4 uses zero point 8.
+> Scope: Intel Arc A770 (DG2), Windows 11, oneAPI 2026.2, driver `32.0.101.9150`. Operator: `y = x * W` (`W` packed 4-bit `[N, K/2]`, low nibble first along `K`, per-group scales). Distinct from `GEMV-N1` (`A * x`).
 
-Evidence scope: `[MEASURED]` on Intel Arc A770 / oneAPI 2026.1 / driver
-`32.0.101.8724`, N/K in `{4096,8192}`, group size in `{32,64,128,256}`.
-Re-measure before transferring to other GPUs, drivers, or shapes.
+## 1. Production ESIMD Online-Dequant Fast Path (`oneAPI 2026.2`) `[MEASURED]`
 
-## Contents
+Earlier oneAPI 2026.1 attempts stalled at `1.7–5.7 ms` (forcing impractical host pre-dequantization). On **oneAPI 2026.2**, zero-buffer on-device dequantization achieves high throughput by aligning `BK` to `group_size`, coalescing `16 B` reads, and using SLM LUTs:
 
-- Three Routes Compared
-- oneAPI 2026.2 ESIMD Fast Path (`BK=gs=64` Zero-Branch Dequant + XMX `dpasw`)
-- oneDNN Baseline
-- Why Host Pre-Dequant Is Not a Weight-Only Solution
-- Negative Results and Pitfalls
+### 1.1 `4-Bit` (`NF4` / `INT4Sym`) Online-Dequant ESIMD `dpasw` GEMM (`512x4096x4096, gs=64`)
 
-## Three Routes Compared
+- **Geometry (`BM=64, BN=64, BK=64, WG=32 (8x4)`)**: Setting **`BK == group_size == 64`** guarantees exactly one scale per K-tile, eliminating inner-loop integer division and branching.
+- **Coalesced `4x16 B` OWord reads + SLM LUT**: Load packed weights via `esimd::block_load<uint32_t, 4>` (`16 B`, 8 nibbles/`uint32_t`), stage the 16-entry `float` NF4 codebook at the tail of SLM (total SLM `32,832 B <= 48 KB` -> `2 WGs/Xe-core`), look up via SIMD16 `esimd::slm_gather<float, 16>`, multiply by the tile scale, convert to `bf16`, and write 16 B-aligned VNNI slots via **`esimd::slm_block_store<uint32_t, 4>`** before `esimd::xmx::dpasw<8,8>`.
+- **Measured performance (`5x`-batched L0 Regular Replay, `errors=0` vs CPU ref)**:
+  - `NF4` fast path: **`763.9–764.1 us` (`22.49 TFLOPS`)** -- **`12.95x` faster** vs naive 8 B-strided + dynamic register-array LUT baseline (`9886.6 us / 1.74 TFLOPS`).
+  - `INT4Sym` fast path: **`699.1–706.6 us` (`24.57 TFLOPS`)**.
 
-| Route | Idea | M=64 representative |
-|---|---|---:|
-| R1 | packed load -> unpack/dequant -> FMA | 13.7-41.5 ms |
-| R2 | packed load -> device unpack -> VNNI SLM tile -> ESIMD DPAS | 2.85-5.65 ms |
-| R3 | host dequant + VNNI pack -> DPAS control | 0.25-0.65 ms |
-| oneDNN | u4 `ba` + f16 scales + zp8 + `fpmath_mode::any` | 0.14-0.32 ms |
+Copy-ready core: [4-bit BK=gs=64 online dequant core](api/code-snippets.md#4-4-bit-nf4--int4sym-bkgs64-zero-branch-dequant--slm-lut-core).
 
-`[MEASURED]` M=64 mean device-time ratios over the 16 swept INT4 shapes:
-R1/R2 = 5.96x, R2/R3 = 9.91x, R1/R3 = 59x. Against the accuracy-matched
-oneDNN baseline below, R3 device-time ratio median is 2.071x (min 1.482,
-max 3.142), and wall-time ratio median is 1.170x. If one-shot host
-predequant+VNNI pack is included, R3 pipeline is about 731x slower per
-weight change; that is a weight-change cost, not a kernel speedup.
+### 1.2 Weight-Only Decode GEMV (`4096x4096, gs=64`, `9.4 MB` packed weights, `20x`-batched L0 Replay)
 
-Group-size crossover: `[MEASURED]` none within `{32,64,128,256}`; all routes
-are flat within about 5%. `gs=128` is a `[HEURISTIC]` default, not a measured
-dispatch rule.
+| Format | Batch (`M`) | Median Time | Effective BW | vs `bf16` GEMV (`100.5 us`) |
+|---|---:|---:|---:|---|
+| `NF4` | `1` | **`40.13–40.23 us`** | `235.2 GB/s` | **`2.50x–2.51x` faster** |
+| `NF4` (weight reuse) | `4` | **`47.83–47.87 us`** | `197.3 GB/s` | `11.96 us/token` |
+| `INT4Sym` | `1` | **`27.73–29.03 us`** | **`325.1–340.4 GB/s`** | **`3.47x–3.62x` faster** |
 
-M=1 crossover: `[MEASURED]` R2 is a negative path (`4.47 ms` at
-`1x4096x4096`) because only 4 work-items per work-group are used; R1 is
-`1.76 ms`, R3 is `0.126 ms`, oneDNN is `0.036 ms`.
+## 2. Accuracy-Matched `oneDNN` `u4` Baseline Contract `[DISPATCH]` `[TOOLCHAIN]`
 
-## oneAPI 2026.2 ESIMD Fast Path: BK=gs=64 Zero-Branch Dequant + XMX dpasw `[MEASURED]`
+When benchmarking against `oneDNN`'s `jit:gemm:any` `u4` path, use the **accuracy-matched `f16`-src configuration**:
 
-Breaking the 2026.1 host-predequant boundary above, on **oneAPI 2026.2 + driver `32.0.101.9150`** (`Aurex v0.2`,
-`errors=0` vs CPU reference, zero external dequantization buffer), ESIMD `xmx::dpasw` achieves high XMX throughput
-directly on `NF4` / `INT4Sym` weights when `BK` matches `group_size`:
+- `src`: `{M, K}` **`f16` `ab`**; `weights`: `{K, N}` **`u4` `ba`** (`[N, K/2]`, low nibble first along `K`); `dst`: `{M, N}` `f32` or `bf16` `ab`.
+- `scales`: `{K / group_size, N}` `f16` `ab` (`mask = (1<<0)|(1<<1)`, `groups = {group_size, 1}`); scalar `u8` zero-point `{1} = 8` (signed `[-8, 7]` stored as `u4 + 8`).
+- `fpmath_mode`: **must explicitly set `strict` or `any` with `apply_to_int = true`** (leaving `fpmath_mode` unset is rejected on GPU with `dnnl_error` status 3 `[TOOLCHAIN]`).
+- **Avoid `ab` weights**: Plain `ab` `u4` weights fall back to `ocl:ref:any` (`~110 ms` vs `0.033–0.034 ms` for `ba` on `1024x1536x512`).
+- **`bf16`-src `oneDNN u4` accuracy trap `[CORRECTNESS]`**: `bf16`-src `u4` selects `jit:gemm:any` (`~0.14–0.32 ms` at `M=64`) but fails `rel=5e-2, abs=1e-2` (`~6,070/262,144` errors, `max_abs ~2.1–3.9`). Classify it as `fastest_only` (`comparable_for_speedup = false`), never as a matched baseline.
 
-1. **`Gemm4BitFastEsimdKernel` (`512x4096x4096`, `gs=64`, 5x-batched L0 Regular Replay `[MEASURED]`)**:
-   - **Geometry & zero-branch scale reuse**: `BM=64, BN=64, BK=64, WG=32 (8x4)`. Aligning **`BK == group_size == 64`**
-     eliminates per-iteration integer division and branching inside the K-loop (one `scale` per K-tile).
-   - **Coalesced 16 B reads & SLM LUT**: Load packed 4-bit weights via `4x16 B` OWord `block_load<uint32_t, 4>`, stage
-     the 16-entry `float` codebook at the tail of SLM (`32,832 B <= 48 KB`), dequantize via SIMD16 `esimd::slm_gather`,
-     and write 16 B-aligned VNNI slots via `esimd::slm_block_store<uint32_t, 4>` before `dpasw<8,8>`.
-   - **Measured vs initial byte/8B path**: `gemm_nf4_fast_dpasw` reaches **`763.92–764.08 us` (`22.49 TFLOPS`)** and
-     `gemm_int4_fast_dpasw` reaches **`699.10–706.56 us` (`24.57 TFLOPS`)** — **`12.95x` faster** vs the initial
-     8 B-strided + dynamic register-array LUT baseline (`9886.56 us / 1.74 TFLOPS`; 32-bit + scalar SLM LUT still
-     stalled at `9233 us / 1.86 TFLOPS` due to 8 B fragmented stride thrashing and loop division).
-2. **Decode GEMV (`4096x4096, group_size=64`, `9.4 MB` packed weights, 20x-batched L0 Regular Replay `[MEASURED]`)**:
-   - `NF4` (`rows=1`): **`40.13–40.23 us`** (`235.2 GB/s`, **`2.50x–2.51x`** faster vs `bf16` GEMV `100.51–100.68 us`);
-     `rows=4` reuse hits `47.83–47.87 us` (`11.96–11.97 us/tok`).
-   - `INT4Sym` (`rows=1`): **`27.73–29.03 us`** (`325.1–340.4 GB/s`, **`3.47x–3.62x`** faster vs `bf16` GEMV).
+## 3. Why Host Pre-Dequantization Fails & Correctness Traps `[CORRECTNESS]` `[BUG]`
 
-## oneDNN Baseline
-
-### oneDNN-Matched (selected)
-
-`[DISPATCH]` The accuracy-matched baseline for M=64 speedup calculation:
-
-- src `{M,K}` f16 `ab`
-- weights `{K,N}` u4 `ba` (`[N,K/2]`, low nibble first)
-- dst `{M,N}` f32 `ab`
-- scales `{G,N}` f16 `ab`, mask `(1<<0)|(1<<1)`, dims `{group_size,1}`
-- scalar u8 zero point `{1}` = 8
-- `fpmath_mode::strict` with `apply_to_int=true` (`any` also passes)
-- implementation `jit:gemm:any`
-- `semantics_id = gemv_m1_mkn_rowmajor`
-- `accuracy_class=matched`, `comparable_for_speedup=true`
-
-`[MEASURED]` 16 f16-src configurations (strict/any x f16/f32 scales x
-scalar/group zp x bf16/f32 dst) all passed `rel=5e-2, abs=1e-2` on all 16
-swept shapes, and all within about 3% on the representative
-`64x4096x4096, gs=128` case. No fpmath/scale/zp dispatch rule is claimed; the
-selected form is the simplest stable member.
-
-Representative matched timings (device median):
-
-| Shape | oneDNN | R3 | ratio |
-|---|---:|---:|---:|
-| `64x4096x4096, gs=128` | 0.1577 ms | 0.2544 ms | 1.61x |
-| `64x8192x8192, gs=128` | 0.2089 ms | 0.6563 ms | 3.14x |
-
-### oneDNN-Fast Only (bf16 src)
-
-`[MEASURED]` every bf16-src configuration selected `jit:gemm:any` but failed
-the required tolerance on all 16 shapes. Representative
-`64x4096x4096, gs=128, bf16->bf16`: `6072/262144` errors, max abs `3.873`;
-`bf16->f32`: `6066/262144` errors, max abs `2.099`. Classify bf16-src oneDNN
-as `fastest_only` when the executable confirms the same `semantics_id` and a
-relaxed accuracy mode; without that confirmation it is `invalid`, not a
-lower bound.
-
-### Toolchain Gate
-
-`[TOOLCHAIN]` on oneDNN 3.11.2, leaving `fpmath_mode` unset rejects the u4
-primitive descriptor on GPU (`dnnl_error`, status 3). Working forms are
-`strict` or `any` with `apply_to_int=true`. `fpmath_mode::high` does not exist
-in oneDNN 3.11.2.
-
-Record these fields in every baseline artifact:
-`accuracy_class`, `reference_tolerance`, `baseline_correctness_status`,
-`comparable_for_speedup`.
-
-## Why Host Pre-Dequant Is Not a Weight-Only Solution
-
-`[MEASURED]` one-shot host dequant+VNNI pack costs `101.8 ms` at
-`4096x4096` and `304.3 ms` at `8192x8192`, versus 0.25-0.65 ms kernel time.
-Dequantized bf16 VNNI weights are 4x the packed size. The u4-vector GEMV trick
-does not transfer because weights are O(K*N), not a `[1,K]` vector shared by
-every row.
-
-## Negative Results and Pitfalls
-
-- `[CORRECTNESS]` packed W byte offset for K offset `bk` is `bk / 2`, not
-  `bk * (BK/2)`. The latter silently reads into the next K block from block
-  two onward.
-- `[CORRECTNESS]` M=1 DPAS kernels must read row `min(global_row, m-1)` and skip
-  stores with `gr >= m`; otherwise they read rows 1..7 of a one-row buffer and
-  can trigger `UR_RESULT_ERROR_DEVICE_LOST`.
-- `[CORRECTNESS]` the oneDNN-matched result is tied to the f16-precast CPU
-  reference and `rel=5e-2, abs=1e-2`; it does not imply bitwise equality.
-- `[MEASURED]` NF4 R1/R2 are slower than INT4 (28%/18% at M=64) because the
-  codebook lookup is scalar in the device unpack path.
-- `[TOOLCHAIN]` direct mixed u4/f16 DPAS is not available on stable oneAPI 2026.1;
-  R2 unpacks to bf16/f16 VNNI before DPAS.
-- `[TOOLCHAIN]` default `fpmath_mode` (attribute unset) is rejected on this u4
-  path; use `strict` or `any` with `apply_to_int=true`.
+1. **Host pre-dequantization is not weight-only**: Converting `4096x4096` weights on CPU costs `~102 ms` (`~304 ms` for `8192x8192`) and expands VRAM footprint `4x` vs packed `u4`. Only acceptable for tiny static vectors (`u4` input vector `x` of `2 KB` in `GEMV-N1`).
+2. **Packed byte offset trap**: Byte offset for K-block `bk` is `bk / 2`, never `bk * (BK / 2)` (silently reads wrong K blocks from block 2 onward).
+3. **`M=1` DPAS row-guard**: Clamp row reads to `min(global_row, m - 1)` and guard stores `gr < m`; reading past a 1-row buffer can trigger `UR_RESULT_ERROR_DEVICE_LOST`.
+4. **SLM `16 B` alignment**: Never store unpacked VNNI words with 8 B-aligned `slm_block_store<uint32_t, 2>`; DG2 truncates to `16 B` and silently overwrites neighbors.
+5. **No mixed `f16 + u4` public DPAS**: SYCL `esimd::xmx::dpas` enforces `APrecision == BPrecision` for floating-point paths; unpack `4-bit -> bf16` in registers/SLM before `dpasw<8,8>`.

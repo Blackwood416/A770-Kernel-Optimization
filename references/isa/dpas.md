@@ -1,215 +1,61 @@
-# DPAS / XMX on DG2 (XeHPG) — Instruction-Level Facts
+# DPAS / XMX on DG2 (Xe-HPG) -- ISA Facts and 0-Dummy Scheduling
 
-**Scope**: Intel Arc A770 (DG2 / g10 / XeHPG), Windows 11, oneAPI 2026.1, driver IGC
-`32.0.101.9150`, offline assembler IGA `1.1.0-640a706f` (bundled in intel-graphics-compiler
-`visa/iga`). Everything here is either a **legality/encoding fact** read out of the IGA model or
-an **executed measurement** on the A770 through hand-edited GEN asm; the receipt for each row is
-in the Arc-ISA-Research repo (paths given inline, repo-relative).
+> Scope: Intel Arc A770 (DG2 / Xe-HPG), Windows 11, oneAPI 2026.2, driver `32.0.101.9150`. Verified via IGA legality tests, `ocloc disasm`, and executed ESIMD kernels (`errors=0`).
 
-Labels: `[ISA]` = instruction/encoding fact, `[MEASURED]` = executed on the A770, `[SRC]` =
-repo source fact, `[HYPOTHESIS]` = not yet verified.
+## 1. Legal Operand Surface on DG2 `[ISA]` `[ARCH]`
 
-## 1. What `dpas` accepts on DG2
-
-| Item | Rule | Label |
-|---|---|---|
-| Legal shape | `dpas.8x8` only; `SystolicDepth` fixed at 8. Exec size 16 assembles but produces wrong results | [ISA] |
-| bf16 | `dst:f src0:f src1:bf src2:bf` — the form IGC/ESIMD actually emits | [ISA] |
-| f16 | `dst:f src0:f src1:hf src2:hf` | [ISA] |
-| i8 | `dst:d src0:d src1:b src2:b` | [ISA] |
-| Type pairing | accumulator and source precision must be **same class**: `:f` + `:b` is rejected by GED (`GED_SetSrc1Precision: invalid value`), `:si` is not a legal accumulator type (`invalid type`) | [ISA] |
-| `tf32` | **illegal on XeHPG** — GED precision enum only has tf32 for XE.HPC/XE2/XE3, and `ModelXeHPG.hpp`'s DPAS type list has no tf32 row | [ISA] |
-| Regioning | operands take **no** regions; `src2` with `<1;1,0>` fails `invalid src2` | [ISA] |
-| src1 alignment | must be GRF-aligned with subreg 0 (`r1.16` fails `GED_SetSrc1SubRegNum`) | [ISA] |
-| Predication | **silently dropped**: `(f0.0) dpas ...` assembles but encodes PredCtrl=Normal, byte-identical to the unpredicated instruction | [ISA][BUG] |
-| sub-byte accumulators | `dst:hf` / `dst:bf` assemble but ngen and vISA both restrict XeHP/XeHPG to `dst=f` + `src0=f`; treat as DG2-illegal | [ISA] |
-
-Receipts: `probes/022-dpas/legality.csv` (50 rows, 35 accept / 15 reject), `probes/032-dpas/i8probe/`.
-
-## 2. Throughput and latency (measured)
-
-The measurement vehicle is an axpy kernel disassembled out of the **runtime** driver binary,
-with dpas chains injected as straight-line code (`scripts/inject_repeat.py` in the research repo,
-`probes/032-dpas/`). No control flow is introduced, so the kernel always terminates.
-
-### 2.1 Per-instruction cost is fixed
-
-| Configuration | dpas per thread | Device µs (median) |
-|---|---|---|
-| 1 dependent chain, 0 / 512 / 2048 dpas | – / 512 / 2048 | 4.2 / 9.2 / 26.1 |
-| 1 / 2 / 4 / 8 independent chains (4096 threads) | 128 / 256 / 512 / 1024 | 11.9 / 18.7 / 32.4 / 59.7 |
-| bf16 chain vs i8 chain (same instruction count) | 512 | 9.2 vs **9.2** (n=4096), 32.3 vs **32.3** (n=131072) |
-
-- `[MEASURED]` Time is linear in the **number of dpas instructions** and nothing else.
-- `[MEASURED]` Adding **ILP does not help**: 8 independent accumulator chains cost the same per
-  instruction as 1 dependent chain (40.6 → 51.8 ns per dpas per thread; it gets slightly worse,
-  not better).
-- `[MEASURED]` **Precision class does not matter**: replacing bf16 sources with i8 sources leaves
-  the time unchanged.
-- `[MEASURED]` A single dependent dpas chain costs ~10.7 ns per instruction when only one thread
-  runs per EU (low occupancy): that is the raw **latency** (~21 cycles at ~2 GHz).
-
-### 2.2 The number to quote
-
-`[MEASURED]` Thread scaling at a fixed 512 dpas/thread: Δ(over the same kernel with 0 dpas) =
-5.0 / 9.9 / 22.6 / 25.6 µs for 128 / 512 / 2048 / 4096 hardware threads. It saturates from ~2048
-threads, giving an aggregate **≈82 Gdpas/s**, i.e. **≈6.3 ns (≈12.5–13 cycles) per `dpas.8x8`
-per EU** (512 EUs).
-
-**Converting to TFLOPS.** One `dpas.8x8` with `:bf` sources covers K=16, i.e. 2048 FLOP:
-an ESIMD probe that declares an 8x8x16 multiply through `xmx::dpas` compiles to **exactly one**
-`dpas.8x8 (8|M0) r20:f r20:f r12:bf r3.0:bf {$2}`, and that encoding is bit-identical to the
-injected form outside the register/precision fields. So
-
-| Quantity | Value | Label |
-|---|---|---|
-| Pure-dpas aggregate limit | **82 Gdpas/s ≈ 168 TFLOPS bf16** | [MEASURED] |
-| Best measured bf16 GEMM in this skill | 100.63 TFLOPS | [MEASURED] (kernel-level, memory included) |
-| Theoretical peak at ~2.1 GHz | 137.63 TFLOPS | [ARCH] |
-| Hardware model | 64 MAC/cycle/EU (8 lanes × 8 systolic) → 16 cycles per 1024-MAC dpas; measured 12.5–13 cycles ≈ 79 MAC/cycle/EU (±20%, clock/median uncertainty) | [HEURISTIC] |
-
-**The useful reading: the best measured bf16 GEMM reaches only ~60% of the XMX instruction limit, so
-there is ~1.6× of headroom left for a GEMM that removes memory and wave-quantization stalls.**
-
-### 2.3 What this means for kernels
-
-- `[MEASURED]` You cannot buy XMX throughput with instruction-level parallelism, wider tiles per
-  thread, or a cheaper precision class. The per-EU issue rate is the wall.
-- The only lever is **occupying more EUs**: raise occupancy / fix wave quantization, do not
-  micro-tune the dpas sequence.
-- Consequences for tiling: prefer giving each thread *fewer, longer-lived* accumulators so
-  occupancy stays high, rather than stacking many independent dpas per thread.
-
-## 3. Related pages
-
-- `swsb.md` — scoreboard/dependency encoding, and why a dependency-free instruction stream can
-  fail to complete at all.
-- `regions-banks.md` — what operand regions and register banks do and do not cost.
-
-## Legal envelope of dpas on DG2 (assembler-verified, 100 combinations)
-
-| dimension | legal | rejected |
-|---|---|---|
-| shape dpas.RCxSD | RC, SD in {1,2,4,8} (10 shapes) | 16x*, 32x* -> invalid subfunction |
-| precision pair | f+hf, f+bf, d+b, d+ub | f+f -> GED_SetSrc1Precision invalid |
-| exec size | any of 1/2/4/8/16/32 | - |
-| quarter mask | M0/M8/M16/M24 | - |
-| subregister on any operand | accepted (.0-.4) | - |
-| regioning on any operand | none | <1>, <2>, <1;1>, <2;1> -> does not support regioning |
-| compaction | never | {Compacted} -> GED unable to compact instruction |
-| hand-written SWSB | not allowed | {A@1,$2} -> invalid SWSB |
-| register alignment / range | not checked by IGA | (so assembler acceptance is not legality) |
-
-Register footprint of one dpas.8x8: dst 8 GRFs + src1 8 + src0 8 + src3 8 = **32 GRFs**, so a 128-GRF
-file holds about 4 independent dpas at a time. Combined with the ban on regioning (no register reuse),
-that is the structural reason more independent chains stop paying off.
-
-## dpasw: the "wide" sibling (DG2)
-
-`dpasw` is a **separate opcode**, not an operand-swapped `dpas`: with identical operands the only
-difference in the 16-byte encoding is the first byte (`0x59` for dpas, `0x5A` for dpasw, IGA
-`ModelXeHPG.hpp:302`), and IGA names it "Dot Product Accumulate Systolic **Wide**".
-
-What "wide" changes (all three sources agree):
-
-1. **A operand is half size**: for the same M×K, ESIMD's `xmx::dpasw` requires `AN` elements where
-   `dpas` needs `2*AN` (`AFactorForDPASW = 2`, `xmx/dpas.hpp:136-138`).
-2. **SIMD8 only**: the ESIMD static assert allows execution size 8 or 16 for dpas but only 8 for
-   dpasw (`dpas.hpp:147-148`), and IGC's OpenCL table says the same ("split matrix (dpasw, simd8
-   only)").
-3. **Cannot share a compaction macro with dpas**: IGA's `RegDeps.cpp:834` states "DPAS and DPASW
-   should not be in the same macro", so mixing them splits scheduler slots.
-
-Assembler-level legality (IGA oracle, `probes/060-dpasw`, 45 rows):
-
-| aspect | dpasw result |
+| Item | DG2 Rule |
 |---|---|
-| shapes | 1x1, 1x8, 2x2, 2x8, 4x2, 8x1, 8x2, 8x4, 8x8 accepted; 16x8 rejected (`invalid subfunction`) |
-| type pairs | `f <- hf`, `f <- bf`, `hf <- hf`, `d <- b/ub/u4/s4/u2/s2` |
-| operand alignment | no 8-GRF enforcement (src1 r21/r22/r24 and src2 r31/r34/r36 all assemble) |
-| aliasing | dst==src1, dst==src2, src1==src2 all assemble |
-| `{Compacted}` | rejected, same as dpas (`GED unable to compact instruction`) |
-| SWSB | `{@1,$2}` and `{$2}` accepted; `{A@1,$2}` and `{@1,$2.dst}` rejected (DPAS is a "math-class" instruction: use `{@n,$m}`) |
+| Execution size | **`SIMD8` only** for both `dpas` and `dpasw` on DG2. `ExecutionSize=16` compiles/assembles but produces wrong results (`78/128` errors `[BUG]`). |
+| Systolic depth (`SD`) & repeat count (`RC`) | `SD` fixed at `8`; `RC in {1, 2, 4, 8}`. `16x*` and `32x*` are illegal. |
+| `K` per DPAS (`SD=8`) | `fp16`/`bf16`: `OPS_PER_CHAN=2 -> K=16`; `i8`/`u8` (or mixed `i8`+`u4`): `OPS_PER_CHAN=4 -> K=32`; both inputs `<= 4-bit` (`u4`/`s4`/`u2`/`s2`): `OPS_PER_CHAN=8 -> K=64`. |
+| Legal precision pairs | `f <- bf, bf`; `f <- hf, hf`; `d/ud <- b/ub/s4/u4/s2/u2` (including mixed low-bit integer pairs). |
+| Illegal on DG2 | `tf32` (XeHPC+ only), `fp8` (absent), `dst:hf`/`dst:bf` accumulators (IGA accepts `hf`, but DG2 VISA/codegen rejects `dst:hf`; always accumulate in `f32`), mixed `f16 + u4` (ESIMD public API rejects `APrecision != BPrecision`). |
+| Operands, regioning, compaction | No operand regions (`<1;1,0>` rejected); `src1` (B) must be GRF-aligned subreg `0`; `{Compacted}` rejected; predication `(f0.0)` is silently dropped `[BUG]`. |
+| Layout | `A` (`src2`) is row-major; `B` (`src1`) is VNNI-packed (`word = (k/2)*N + n` for 16-bit, 4-way K-packed for 8-bit). |
+| Low-bit `INT2` note | `INT2` shares `OPS_PER_CHAN=8` (`K=64`) with `INT4`; it does **not** double `INT4` DPAS arithmetic throughput (value is storage/bandwidth reduction only). |
 
-Runtime status on this box (updated in oneAPI 2026.2 + ESIMD `grf_size<256>`): `esimd::xmx::dpasw<8,8>` compiles cleanly and is the core instruction for DG2 BF16 GEMM, reaching **`92.5 TFLOPS`** on `4096x4096x4096` (`commit bf81332`, `spill=0 B, priv=0 B`, main-loop `send.dc0 == 0`) `[MEASURED]`. (Earlier single-work-item micro-probes in oneAPI 2026.1 scattered over 11.1–54.3 us because 1 thread cannot saturate XMX).
+## 2. Measured Throughput and Latency `[MEASURED]`
 
-## IGC dummy_dpasw (null:f) injection and 0-Dummy grouping theorem `[SRC]` `[MEASURED]`
+Measured with straight-line `dpas.8x8` chains at `4,096` HW threads:
 
-In large multi-accumulator GEMM loops, `ocloc disasm` reveals IGC injecting idle 8-cycle **`dpasw.8x8 (8|M0) rX:f null:f rX:bf rX.0:bf`** instructions inside `dpasw` chains (`19/128 = 14.8%` to `17/96 = 17.7%` extra instructions, wasting `15%–18%` of XMX issue capacity `[MEASURED]`).
+- **Per-EU issue ceiling**: **`~82 Gdpas/s`** aggregate (`~6.3 ns` = `~12.5–13 cycles` per `dpas.8x8` per EU), equivalent to `~168 TFLOPS` pure instruction limit (`137.63 TFLOPS` theoretical at `~2.1 GHz`; `100.6 TFLOPS` verified microkernel peak; **`92.5 TFLOPS`** end-to-end `4096^3` bf16 GEMM).
+- **Single-chain latency**: `~10.7 ns` (`>= 21 cycles`) at low occupancy.
+- **ILP and precision invariance**: `8` independent accumulator chains cost the same per instruction as `1` chain at saturation; `bf16` and `i8` chains run at identical per-instruction latency (`9.2 us` vs `9.2 us` at `512` ops). Throughput scales by filling XVEs and eliminating stalls, not by stacking redundant DPAS chains.
 
-1. **Root cause (`[SRC]` IGC vISA source: `SWWA.cpp`, `SWSB_G4IR.cpp`, `LocalScheduler_G4IR.cpp`)**:
-   - On DG2, `hasDpasSrc2ReadSupression() == false` and `getDpasSrcCacheSize(Opnd_src1) == 512 B` (2 B-operands). Whenever any `dpasw` `src1` in the kernel was written by a non-`send` instruction (e.g., packing `mov` or register reuse), `prepareDPASFuseRSWA` sets `mayNeedRSWA = true`.
-   - `SWSB_G4IR::needWA`: whenever an emitted `dpasw` macro has `macro.len > 1` AND **`first->src1 == second->src1`** (the first two instructions of a macro read the same `B` register), IGC prepends an 8-cycle `dummy_dpasw (null:f)`! Only the very first macro of a basic block requires 1 unavoidable entry dummy; all subsequent dummies are eliminable.
-   - **Negative verification**: Switching back to `dpas<8,8>` does **not** eliminate `null:f`—IGC still inserts dummy `dpas`, while doubling `A` SLM read bandwidth and overflowing DG2 SLM read throughput (`2048x4096x2048` regresses **`-12.4%`** vs `dpasw`) `[MEASURED]`.
-2. **Why naive `b0, b1, b0, b1` alternation fails**: `LocalScheduler_G4IR` (`canInSameDPASMacro` and `applyDpasHeuristic`) pulls adjacent `size()==1` nodes with identical `src1` together and splits pairs arriving on different SLM SBIDs (`a01` vs `a23`).
-3. **0-Dummy Grouping Theorem (verified on A770 to cut main-loop `dummy_dpasw` from `19/16/11` down to the theoretical floor of `1`)** `[MEASURED]`:
-   - **Condition A (Single lead + grouped followers)**: Within each DPASW macro, at most **one** `src1` group may have `size == 1` (using distinct `B` registers across macro heads); all remaining same-`src1` uses must be grouped into contiguous **`size >= 3`** blocks.
-   - **Condition B (Macro-head alternation)**: The first two instructions of every macro must read different `src1` operands (`first->src1 != second->src1`).
-   - **Condition C (Tail-SBID anchoring)**: Anchor every macro's scheduling dependency on the **last-issued SLM load (`a23`)** so IGC emits a single `sync.allwr` and keeps the macro contiguous in source order.
-   - **Condition D (DG2 macro cap `<= 8`)**: `2x8` macros (4 `B` operands, 8 ops/macro) and `3x4` macros (3 `B` operands, 4 ops/macro) hold intact cleanly. Forcing a `1x16` single macro splits after the second `src1` switch via `sync.allwr`, causing `dummy` to spike `1 -> 17` and regressing `wide (2048x4096x2048)` from `385 -> 433 us` `[MEASURED]`:
-     - **`4xB` (`2x8`, used in `128x256 cab4` & `SwiGLU`)**: Macro 1: `[b0(a3)](1) -> [b1(a0,a1,a2,a3)](4) -> [b0(a0,a1,a2)](3)`; Macro 2: `[b2(a3)](1) -> [b3(a0,a1,a2,a3)](4) -> [b2(a0,a1,a2)](3)`.
-     - **`3xB` (`3x4`, used in `Btile192`)**: Macro 1: `[b0(a3)](1) -> [b1(a0..a2)](3)`; Macro 2: `[b2(a3)](1) -> [b0(a0..a2)](3)`; Macro 3: `[b1(a3)](1) -> [b2(a0..a2)](3)`.
+## 3. `dpasw<8,8>`: The Wide Sibling (Production Default) `[ISA]` `[MEASURED]`
 
-## Precision surface: f16 accumulation and 4/2-bit inputs
+`dpasw` (opcode `0x5A`, vs `0x59` for `dpas`) exploits DG2's Fused-EU architecture:
 
-IGA oracle (`probes/061-dpas-types`, 27 rows): the type table belongs to the instruction *format*, so
-`dpas` and `dpasw` and every legal shape share it.
+1. **Halves per-thread `A` operand size**: Paired even/odd threads `(2k, 2k+1)` share the fused EU pair and read only half of `A` (`256 B` instead of `512 B`), cutting exact `-32 Send/thread` on `bf16` and `-16 Send/thread` on `int8`.
+2. **Source accessibility**: Unreachable from OpenCL C, but **natively reachable in SYCL/ESIMD** via `esimd::xmx::dpasw<8, 8, float>(acc, b, a)` (oneAPI 2026.2+). Pair with bit-swapped SLM `A` cooperative writes (`slm_tid = (tid & ~6) | ((tid & 2) << 1) | ((tid & 4) >> 1)`) so each thread issues a single coalesced `slm_block_load`.
+3. **Never revert to `dpas<8,8>` on large GEMM**: Switching back to `dpas` doubles `A` SLM read bandwidth (hitting the `3.3–3.8 TB/s` SLM read wall) and still incurs IGC dummy insertions, regressing `2048x4096x2048` by **`-12.4%` vs `dpasw`** `[MEASURED]`.
+4. **Do not mix `dpas` and `dpasw` in the same loop**: IGA forbids them from sharing a systolic macro, fragmenting scheduler slots.
 
-| question | answer |
-|---|---|
-| f16 accumulation (`hf` dst) | **IGA/GED accepted** (`dpas.8x8 hf <- hf,hf`, `hf <- hf,bf`, `hf <- bf,bf`) **but DG2-illegal in practice**: ngen and vISA restrict XeHP/XeHPG to `dst=f` + `src0=f` (see the sub-byte accumulator row above), so treat hf accumulation as assembler-only |
-| hf dst with f32 input | **rejected**: `GED_SetSrc1Precision: invalid value` (`IGALibrary/GED/Encoder.cpp:701`) |
-| 4-bit / 2-bit inputs | **accepted** with an integer destination: `u4+s4`, `u4+u2`, `s2+s2`, `u2+s4`, ... |
-| low-bit mixed with 8-bit | **accepted**: `u8+s2`, `s2+u8`, `u4+u8`, `u4+s2` |
-| low-bit with `f` destination | **rejected**, same `GED_SetSrc1Precision` message; `d` and `ud` both work |
-| dpasw / 2x2 shapes | same surface (`hf<-hf,hf`, `d<-u4,s2`, `d<-u8,s8`) |
+## 4. IGC `dummy_dpasw (null:f)` Injection and 0-Dummy Grouping Theorem `[ISA]` `[MEASURED]`
 
-Consequences for kernel design: an f16 accumulator forces hf/bf inputs (no f32 inputs with an hf
-accumulator), and low-bit inputs force an integer accumulator (`d`/`ud`), i.e. a low-bit GEMM must
-accumulate in integers and dequantise afterwards. The hf-accumulator half of that is an IGA-level fact only:
-DG2 codegen refuses `dst:hf` (C0025), so in OpenCL/SYCL you always end up with an `f` accumulator. Element counts per operand change with the bit
-width, so throughput must be derived from packed widths, never from instruction counts.
+In multi-accumulator ESIMD GEMM loops, `ocloc disasm` frequently reveals IGC inserting idle 8-cycle **`dpasw.8x8 (8|M0) rX:f null:f rX:bf rX.0:bf`** instructions (`15%–18%` XMX throughput loss `[MEASURED]`).
 
-## GEMM tile and occupancy for dpas on DG2 (P3, `docs/53`)
+### Why IGC Inserts `null:f`
 
-The bf16 `xmx::dpas` GEMM (`bench/bf16_gemm_esimd.cpp`, 8x8x16, f32 accumulator) was swept across every
-legal resident tile; the constraints are structural, not tunable:
+- DG2 lacks src2 read suppression (`hasDpasSrc2ReadSupression() == false`), and its `src1` (B) cache holds `512 B` (2 B operands).
+- Whenever any `dpasw` `src1` in the kernel was written by a non-`send` instruction (e.g., packing `mov` or register reuse), IGC enables the systolic read-suppression workaround (`mayNeedRSWA = true`).
+- Whenever an emitted `dpasw` macro has **`macro.len > 1` AND `first->src1 == second->src1`** (the first two instructions of a macro read the same `B` register), IGC prepends an 8-cycle `dummy_dpasw (null:f)`. Only the first macro of a basic block requires `1` unavoidable entry dummy; all remaining dummies can be eliminated.
+- Naive alternating order (`b0, b1, b0, b1...`) still fails because IGC's local scheduler clusters `size == 1` same-`src1` nodes together and splits pairs arriving on different SLM load SBIDs (`a01` vs `a23`).
 
-- one ESIMD work-group is one DSS's 128 threads, so `WG = (BM/8) * (BN/TN)` must be 128 (I-003: `WG >= 256`
-  is never dispatched and hangs);
-- SLM staging needs `2 * (BM*BK + BK*BN) * 2 B <= 65,536`, which caps `BK` once the tile grows;
-- the per-thread staging split must divide exactly: `BM*BK/16` and `BN*BK/16` must both be multiples of 128
-  (BK=16 forces BM and BN to multiples of 128, BK=32 relaxes it to multiples of 64).
+### 0-Dummy Grouping Theorem (Cuts `dummy_dpasw` from `19/16/11` Down to `1`) `[MEASURED]`
 
-Best point: **BM=256 BN=192 BK=32 TN=48** (SLM 57,344 B, 32 work-groups, one per DSS) = 96.9-105.2 us over four
-pinned records, versus 118.4 us for the old 128x128/BK32/TN16 tile, and oneDNN `jit:gemm:any` at 71.4-72.5 us.
+Satisfy all four conditions simultaneously:
 
-What the counters say (`docs/53` §6b-6d): 786,432 dpas at 8.1 Gdpas/s is only **9.9 %** of the DG2 issue ceiling
-(~82 Gdpas/s from `docs/07`), XVE stalled 93 %, L3-bound 0.8 %, so the kernel waits on load/barrier latency rather
-than on XMX issue. The gap to oneDNN decomposes exactly into "our kernel executes 2.54x more instructions, each
-2.16x cheaper" (`docs/53` §6c). Two work-groups per DSS (WG=64) was measured and is slower (108-116 us), and a
-third SLM pipeline stage does not fit at 256x192 (would need ~86 KB). So further gains need a kernel change
-(two M-chains per thread, separate A/B pipelines), not another `-D` value.
-
-## GEMM v2: two M-chains per thread, and why it is only worth 2.5 % (P4, `docs/56`)
-
-The first structural change from that list is now measured (`bench/bf16_gemm_esimd_v2.cpp`, `probes/081-gemm-v2`).
-`TM=16` gives every thread **two** 8x8 DPAS tiles in M, so one B operand load feeds two `dpas`; the per-thread
-operand read per K-tile falls from `(TM+TN)*BK*2 = 3584 B` to `2560 B` (-28.6 %) at the same WG=128, SLM 57,344 B
-and 32 work-groups. Adopted configuration: **BM=256 BN=192 BK=32 TN=24 TM=16**, plus issuing the next SLM stage
-store before the dpas loop.
-
-- Paired A/B in one session, 5 alternating rounds: **5/5 rounds faster**, mean -2.44 us (ratio 0.9752).
-- Pinned records: **95.11-96.00 us** vs oneDNN 72.22-72.81 us (1.31-1.33x behind, still ~0.76 of the library).
-- The gain is *below* the +-8 % spread of the v1 record set (96.9-105.2 us), so adopt on the paired sign test and
-  the instruction count, never on one median.
-
-What did **not** pay, both measured: 24 work-groups (two variants, 101.7-104.2 us) and the early store on its own
-(~0.5 %). And the counter check that explains the small win: v2 executes only 4.7 % fewer instructions
-(18.56e9 -> 17.69e9) and runs 1.4 % faster, with XVE stalled 92.3/92.5 % - so this kernel is neither LSC-message
-bound nor instruction bound. Feeding XMX is a dependency chain (global load -> SLM store -> barrier -> operand
-read), and breaking it needs more pipeline stages than 64 KB of SLM allows.
-
-Roofline caution: use the **XMX bf16** throughput (`docs/07`: ~82 Gdpas/s) as the denominator, never the A770
-39.32 TFLOPS figure - that one is the FP32 vector peak and inflates this shape's floor from 9.6 us to 41 us.
-At 95.11 us the kernel is at 10.1 % of the measured dpas ceiling, at 72.22 us oneDNN is at 13.3 %.
+1. **Single lead + grouped followers**: Inside each macro, allow at most **one** `size == 1` `src1` node (using distinct `B` registers across macro heads); pack every remaining same-`src1` use into a contiguous **`size >= 3`** block so the heuristic skips it.
+2. **Macro-head alternation**: Ensure `first->src1 != second->src1` at the head of every macro.
+3. **Tail-SBID anchoring**: Start each macro with the `A` slice from the **last-issued SLM load (`a23` / `a3`)**, so IGC waits once with `sync.allwr` and keeps the entire macro in exact source order.
+4. **Respect DG2 macro cap `<= 8`**:
+   - **`4xB` (`2x8` macros -- `128x256 cab4` & `SwiGLU`)**:
+     - Macro 1 (8 ops): `[b0(a3)](1) -> [b1(a0,a1,a2,a3)](4) -> [b0(a0,a1,a2)](3)`
+     - Macro 2 (8 ops): `[b2(a3)](1) -> [b3(a0,a1,a2,a3)](4) -> [b2(a0,a1,a2)](3)`
+   - **`3xB` (`3x4` macros -- `Btile192`)**:
+     - Macro 1 (4 ops): `[b0(a3)](1) -> [b1(a0,a1,a2)](3)`
+     - Macro 2 (4 ops): `[b2(a3)](1) -> [b0(a0,a1,a2)](3)`
+     - Macro 3 (4 ops): `[b1(a3)](1) -> [b2(a0,a1,a2)](3)`
+   - **Never force a `1x16` macro**: IGC forcibly splits it via `sync.allwr` after the second `src1` switch, spiking `dummy` from `1 -> 17` and regressing `2048x4096x2048` from `385 -> 433 us` `[MEASURED]`.

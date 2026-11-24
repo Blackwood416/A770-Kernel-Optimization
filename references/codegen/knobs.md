@@ -1,82 +1,63 @@
-# Compiler Knobs That Actually Change the ISA on DG2
+# Compiler Flags, Codegen Behaviour, and `-Xfinalizer` Knobs on DG2
 
-**Scope**: A770 (DG2), ocloc IGC `32.0.101.8857`, icpx 2026.1. Established by compiling one fixed
-kernel with each flag, disassembling, and diffing line by line (`probes/048-knobs/knob_atlas.ps1`,
-`docs/23-compiler-knobs.md`). Kernel: mul-add, divide, `sqrt`, int conversion, SLM + barrier, atomic add.
+> Scope: Intel Arc A770 (DG2), Windows 11, oneAPI 2026.2 (`icx` / `icx-cl` / `ocloc`), driver `32.0.101.9150`. Always verify whether a flag changed the disassembly (`ocloc disasm`), never just the binary hash.
 
-## 1. The vISA flag surface is unreachable from OpenCL `ocloc` `[TOOLCHAIN]`
+## 1. SYCL/ESIMD VC Backend: `-Xfinalizer` Reachable Knobs `[MEASURED]` `[TOOLCHAIN]`
 
-`VISAOptionsDefs.h` defines **487** `-options` (416 of them not dump/debug). None of them can be
-delivered via the legacy OpenCL `ocloc` path:
-
-| attempt | result |
-|---|---|
-| `ocloc ... -igc_opts '...'` | `Invalid option: -igc_opts` |
-| `ocloc ... -options "-igc_opts '<flag>'"` | builds, but the disassembly is byte-identical to the baseline |
-| env `IGC_VISAOptions` / `IGC_Options` | no effect |
-| `-dumpVisaOptionsAll` (a vISA dump flag) as a probe | no output at all - the flag never reaches vISA |
-
-22 pass switches (SendFusion, WriteFusion, AtomicFusion, MACOpt, MsgHeaderOpt, RegRenaming, CSEL,
-SCF, MergeScalar, CSE4Send, InstCombine, CopyProp, FlagOpt, DefHoist, FoldAddrImm, DCE,
-forceGRFModeUp, PrefetchL1, IfCvt, AccSub family) were all no-ops in the disassembly.
-Treat vISA knobs mentioned in IGC documentation as dead configuration on this toolchain.
-
-## 2. Reachable knobs that do change codegen `[MEASURED]`
-
-Baseline is 140 instructions.
-
-| flag | instructions | what changed |
-|---|---|---|
-| `-cl-opt-disable` (= O0) | **603** (+463) | introduces `call`/`goto`/`ret` (no inlining), `sync.allrd`/`sync.allwr`, `asr`/`bfn`/`shr` |
-| `-cl-fp32-correctly-rounded-divide-sqrt` | **447** (+307) | `math.sqt` disappears, replaced by `math.rsqt` + `bfn`/`asr`/`shr`/`xor` Newton iterations |
-| `-cl-fast-relaxed-math` | 110 (-30) | drops `not` (comparisons folded into predication) |
-| `-cl-unsafe-math-optimizations` | 112 | same, drops `not` |
-| `-cl-finite-math-only` | 140 | only two `mov null<1>:ud <imm>` immediates differ |
-| `-cl-denorms-are-zero` | 140 | **only `or cr0.0 ..., 0x4C0` becomes `0x40`** - the denormal bit is cleared in cr0 |
-| `-cl-no-signed-zeros` | 140 | cr0 / immediates only, like finite-math |
-| `-cl-intel-256-GRF-per-thread` | 141 (fixed test kernel; 158 on an earlier kernel, `knob_atlas.csv`) | register allocation changes, one `mad` becomes `csel` |
-| `-cl-std=CL3.0` | 140 | bytes change, instruction count does not |
-
-No change at all: `-cl-mad-enable` (already using `mad`), `-cl-single-precision-constant`,
-`-cl-intel-enable-auto-large-GRF-mode`, `-cl-no-subgroup-ifp`.
-Rejected by ocloc: `-options -O2` / `-O3`, `-cl-intel-has-bindless-style-buffers`.
-
-## 3. How to use this
-
-1. **Instruction-level levers available without touching source**: O0 (for ISA forensics - it keeps
-   calls and control flow, so the disassembly is far easier to map to source), `-cl-fast-relaxed-math`
-   (removes `not`), and `-cl-fp32-correctly-rounded-divide-sqrt` (trades `math.sqt` for an rsqrt +
-   Newton sequence at ~3x the instruction count).
-2. **Precision knobs mostly rewrite `cr0`, not opcodes.** denorm / signed-zero / finite-math all live
-   in cr0 bits, so they leave the instruction count untouched while changing numerical behaviour.
-   Always record them in the environment fingerprint of a numerical comparison.
-3. **`-cl-intel-256-GRF-per-thread` is the only reachable large-GRF switch.** It changes register
-   allocation wholesale and is the entry point for measuring large-GRF behaviour.
-4. A flag that "builds fine" has not necessarily done anything: always diff the disassembly, not just
-   the binary hash (metadata alone makes hashes differ).
-
-## 4. SYCL/ESIMD VC `-Xfinalizer` reachable knobs `[MEASURED]` `[TOOLCHAIN]`
-
-Unlike OpenCL `ocloc`, the **SYCL/ESIMD VC backend** (verified on A770 / oneAPI 2026.2 / driver `32.0.101.9150`)
-delivers `-Xfinalizer <flag>` straight into the IGC vISA finalizer and substantially rewrites SWSB tokens,
-scheduler ordering, and sync placement.
+Unlike legacy OpenCL `ocloc`, the **SYCL/ESIMD VC backend** delivers `-Xfinalizer <opt>` directly to the IGC vISA finalizer and substantially rewrites SWSB token allocation, scheduler order, and synchronization.
 
 Two verified delivery channels:
 
-1. **Static AOT (CMake `target_link_options`, zero runtime env vars)**:
-   `-fsycl "SHELL:-Xs \"-Xfinalizer -flag1 -Xfinalizer -flag2 ...\""`
-2. **Runtime rapid sweep without rebuild**:
-   Set `SYCL_CACHE_PERSISTENT=0` (prevents IGC persistent cache from silently serving stale binaries) and
-   `SYCL_PROGRAM_APPEND_COMPILE_OPTIONS="-Xfinalizer <opt> ..."`.
+1. **Static AOT link embedding (zero runtime env vars)**:
+   `-fsycl "SHELL:-Xs \"-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR\""`
+2. **Rapid runtime ablation sweep (no relink)**:
+   Set `SYCL_CACHE_PERSISTENT=0` (prevents IGC persistent cache from silently serving stale binaries) and `SYCL_PROGRAM_APPEND_COMPILE_OPTIONS="-Xfinalizer <flag> ..."`.
 
-Across a ~45-flag systematic ablation on `GRF=256 dpasw` BF16 GEMM (`bf81332` baseline vs `7ec1b93`):
+Across a ~45-flag systematic ablation on `GRF=256 dpasw` BF16 GEMM:
 
-| Status | Flag(s) | Measured effect on DG2 ESIMD `dpasw` |
+| Category | Flag(s) | Measured Effect on DG2 ESIMD |
 |---|---|---|
-| **Optimal 4-flag set** | `-Xfinalizer -SBIDBundle -Xfinalizer -SWSBDepReduction -Xfinalizer -nopresched -Xfinalizer -twoSrcBundleBCR` | `[MEASURED]` `sync.allrd 5 -> 0`, `Short UGM waits 5 -> 1`, `sync.nop 34 -> 23`, `4096x4096x4096` bf16 GEMM `1555 -> 1488 us` (`1.10x` vs oneDNN) |
-| **`-SBIDBundle` (role)** | Part of optimal set | Allows non-overlapping RAW/WAW `dpasw` macros to share SBIDs (e.g., `$9` / `$12`), preventing 16-SBID thrashing |
-| **`-SWSBDepReduction` (role)** | Part of optimal set | Global token liveness pruning removes redundant `sync.allrd` and cuts `sync.nop` |
-| **`-nopresched` (role)** | Part of optimal set | Disables pre-RA scheduler so hand-ordered ESIMD load/SLM/dpasw interleaving stays intact |
-| **`-twoSrcBundleBCR` (role)** | Part of optimal set | Reduces GRF bank conflicts across dual-source instruction bundles |
-| **Crash / ICE blacklist** | `-dpasScheduleBarrier`, `-presched-ctrl 1`, `-presched-ctrl 2`, `-IGASWSB`, `-raBlockLocalScan`, `-enableDpasFwd 1`, `-dpasMacroBySrc1RS` | `[BUG]` IGC Access Violation or compile failure (`rc=1`); do not pass on DG2 |
-| **Regression blacklist** | `-globalTokenAllocation`, `-distPropTokenAllocation`, `-SBIDL3Hit`, `-noschedule`, `-SWSBMakeLocalWAR`, `-SWSBReplaceARWithAW` | `[MEASURED]` Regresses `LLM` (`~408 -> 423 us`), `XL` (`~1555 -> 1602–1640 us`), or expands sync stalls vs optimal set |
+| **Optimal 4-flag set** | `-Xfinalizer -SBIDBundle` `-Xfinalizer -SWSBDepReduction` `-Xfinalizer -nopresched` `-Xfinalizer -twoSrcBundleBCR` | `sync.allrd 5 -> 0`, `Short UGM waits 5 -> 1`, `sync.nop 34 -> 23`, `4096^3` bf16 GEMM `1555 -> 1488 us` (`1.10x` faster vs `oneDNN 3.13.2` `[MEASURED]`) |
+| `-SBIDBundle` | Part of optimal set | Lets non-overlapping RAW/WAW `dpasw` macros share SBIDs, preventing 16-SBID thrashing |
+| `-SWSBDepReduction` | Part of optimal set | Global token liveness analysis removes redundant `sync.allrd` and cuts `sync.nop` |
+| `-nopresched` | Part of optimal set | Disables pre-RA scheduler so hand-ordered ESIMD load/SLM/dpasw interleaving survives |
+| `-twoSrcBundleBCR` | Part of optimal set | Dual-source bundle optimization; empirically beneficial as part of the 4-flag combo |
+| **Crash / ICE blacklist `[BUG]`** | `-dpasScheduleBarrier`, `-presched-ctrl 1`, `-presched-ctrl 2`, `-IGASWSB`, `-raBlockLocalScan`, `-enableDpasFwd 1`, `-dpasMacroBySrc1RS` | IGC Access Violation or compile failure (`rc=1`); never pass on DG2 |
+| **Regression blacklist** | `-globalTokenAllocation`, `-distPropTokenAllocation`, `-SBIDL3Hit`, `-noschedule`, `-SWSBMakeLocalWAR`, `-SWSBReplaceARWithAW` | Regresses large GEMM (`1024x4096x4096` `~408 -> 423 us`, `4096^3` `~1555 -> 1602–1640 us` vs optimal set `[MEASURED]`) |
+
+## 2. Standard SYCL Optimization Flags and Unrolling `[MEASURED]`
+
+Measured on non-XMX `bf16` standard-SYCL kernels (GEMM `1024x1536x512` and RMSNorm `1024x4096`):
+
+| Flag / Transform | Instruction & Wall Effect | Verdict |
+|---|---|---|
+| `-O0` | `SIMD8`, `15x` slower on GEMM | Use only for ISA forensics (preserves calls/CFG) |
+| `-O2` (default) | Auto-vectorizes to `SIMD32` at `100%` util | **Recommended baseline** |
+| `-O3`, `-ffp-contract=off`, `-ffast-math` | Byte-identical JIT instructions, `+0.3% to +9.3%` wall jitter | Neutral on simple loops; do not rely on `-O3` alone |
+| Explicit `unroll=2` | `-16.6%` instr / **`-23.0%` wall** (GEMM); `-17.1%` wall (RMSNorm) | **Primary source-level win** on simple loops |
+| Explicit `unroll=4` alone | Worse alone than `unroll=2` (`+7.7%` vs `u2`) | Only pays when combined with AOT + `-O3` + fast-math |
+| `-fsycl-device-code-split=per_kernel` | Isolates per-kernel register/module compilation | **Always enable** in multi-kernel ESIMD libraries |
+
+**Large GRF flag discipline**:
+
+- **Never pass global `-ze-opt-large-register-file`** on XMX/ESIMD builds (negative on `joint_matrix` and crashes/fails on legacy ESIMD).
+- **Use per-kernel `sycl::ext::intel::experimental::grf_size<256>`** in ESIMD (`WG=32 + SLM <= 48 KB`) to enable `256-GRF` cleanly without affecting other kernels.
+- For AOT ESIMD sidecars where explicit AOT target flags are required, `-fsycl-targets=spir64_gen -Xs "-device dg2 -options -doubleGRF"` enables 256-GRF AOT binaries.
+
+## 3. OpenCL `ocloc` Path: Dead vISA Surface vs Reachable CL Flags `[TOOLCHAIN]` `[MEASURED]`
+
+On the **OpenCL C (`ocloc`) path only**, all 487 vISA `-options` (`-igc_opts`, `IGC_VISAOptions`, `IGC_Options`, 22 pass switches) are unreachable no-ops. Only CL-level options change OpenCL codegen (baseline = `140` instructions):
+
+| OpenCL Flag | Instructions | What Actually Changes |
+|---|---:|---|
+| `-cl-opt-disable` | `603` (`+463`) | Disables inlining (`call`/`goto`/`ret`) and emits coarse `sync.allrd`/`sync.allwr` |
+| `-cl-fp32-correctly-rounded-divide-sqrt` | `447` (`+307`) | Replaces `math.sqt` with `math.rsqt` + Newton sequence (`~3x` instructions) |
+| `-cl-fast-relaxed-math` / `-cl-unsafe-math-optimizations` | `110` / `112` | Folds comparisons into predication (drops `not`) |
+| `-cl-denorms-are-zero`, `-cl-finite-math-only`, `-cl-no-signed-zeros` | `140` | Rewrites `cr0.0` prologue bitmask only (`0x4C0 -> 0x40`); zero throughput change |
+| `-cl-intel-256-GRF-per-thread` | `141` (AOT only) | Changes AOT RA, but OpenCL runtime recompiles `.spv` back to `128-GRF` |
+
+## 4. IR and Assembly Dump Contract `[TOOLCHAIN]`
+
+- Device text LLVM IR (`-S -emit-llvm`) is unsupported on oneAPI Windows; preserve LLVM bitcode, SPIR-V text (`llvm-spirv --to-text`), and GEN assembly (`ocloc disasm -file <kernel>.zebin -device dg2 -dump <dir>`).
+- For A770 AOT targets, use `-device dg2` (or `dg2-g10-a0`).
+- **CFG / graph-coloring sensitivity**: Even minor edits outside a hot loop (e.g., prologue/epilogue structure or `if constexpr` branches) can perturb IGC register coloring and SBID assignment. Re-run disassembly audit (`send.dc0`, `dummy_dpasw`, `Short UGM waits`) after every structural edit.
