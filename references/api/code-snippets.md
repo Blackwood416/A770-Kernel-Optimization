@@ -9,7 +9,7 @@
 - 3. DG2 Cache-Hint Dispatch & SROA-Safe Named SSA Registers
 - 4. 4-Bit (NF4 / INT4Sym) BK=gs=64 Zero-Branch Dequant + SLM LUT Core
 - 5. Domain I: GEMV Core (Sub-Group Per Row, Direct L2)
-- 6. Domain I: RMSNorm Core (SLM Row Tile, 2 Barriers)
+- 6. Domain I: RMSNorm and Register-Cached Fused LayerNorm Cores
 - 7. Domain I: Softmax Core (SLM Row Tile + Dynamic WG)
 - 8. Stable Online-Softmax Rescale Core
 - 9. Reduction and Hillis-Steele Scan Cores
@@ -180,9 +180,83 @@ q.submit([&](sycl::handler& h) {
 });
 ```
 
-## 6. Domain I: RMSNorm Core (SLM Row Tile, 2 Barriers)
+## 6. Domain I: RMSNorm and Register-Cached Fused LayerNorm Cores
 
-`90.5–99 us` on `1024x4096 f32` (`1.25x` faster vs `oneDNN` `112.9 us` `[MEASURED]`). Reads `x` from global memory once; keeps `gamma` in L2:
+### 6.1 Register-Cached Fused Row LayerNorm (`WG=256, SG=16, cols <= 4096`)
+
+`249.5 us` (`403.4 GB/s` = `100%` read roof) on `2048x4096 f32` `Add+LayerNorm` and `257.8 us` (`390.5 GB/s`, `2.79x` vs `oneDNN 3.13.2`) on `Add+GeluErf+LayerNorm` (`spill=0 B, priv=0 B` `[MEASURED]`). All `reg_vals[_i]` accesses use compile-time constant indices under `#pragma unroll` so LLVM SROA promotes the array to `<= 32 GRF` (`WG=256` uses only `16` HW threads at `SG=16`):
+
+```c
+// OpenCL C (identical pattern applies in SYCL with intel::reqd_sub_group_size(16)):
+// Compile-time constants: WG=256 (cols in 1025..4096), PER=(cols + WG - 1) / WG <= 16, N_SGS=16.
+__attribute__((intel_reqd_sub_group_size(16)))
+__kernel void fused_add_gelu_layernorm_f32(
+    __global const float* restrict a, __global const float* restrict b,
+    __global const float* restrict gamma, __global const float* restrict beta,
+    __global float* restrict out, int rows, int cols, float eps) {
+    __local float smem[16];
+    __local float row_stats[2];
+    const int row = (int)get_group_id(0);
+    if (row >= rows) return;
+    const int lid = (int)get_local_id(0), sg_id = (int)get_sub_group_id(), lane = (int)get_sub_group_local_id();
+    const size_t row_off = (size_t)row * (size_t)cols;
+
+    float reg_vals[16]; // PER <= 16 -> <= 32 GRF out of 128 (0 spill, 0 private mem)
+    float lsum = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const int c = lid + i * 256;
+        if (c < cols) {
+            float x = a[row_off + c] + b[row_off + c];
+            x = 0.5f * x * (1.0f + erf(x * 0.7071067811865475f)); // single prologue eval
+            reg_vals[i] = x;
+            lsum += x;
+        }
+    }
+    float sg_sum = sub_group_reduce_add(lsum);
+    if (lane == 0) smem[sg_id] = sg_sum;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sg_id == 0) {
+        float tot = sub_group_reduce_add((lane < 16) ? smem[lane] : 0.0f);
+        if (lane == 0) row_stats[0] = tot / (float)cols;
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    const float row_mean = row_stats[0];
+
+    // Exact two-pass variance in registers (0 DRAM reads, 0 loop divs, 0 catastrophic cancellation):
+    float lm2 = 0.0f;
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const int c = lid + i * 256;
+        if (c < cols) {
+            float d = reg_vals[i] - row_mean;
+            lm2 = fma(d, d, lm2);
+        }
+    }
+    float sg_m2 = sub_group_reduce_add(lm2);
+    if (lane == 0) smem[sg_id] = sg_m2;
+    barrier(CLK_LOCAL_MEM_FENCE);
+    if (sg_id == 0) {
+        float tot = sub_group_reduce_add((lane < 16) ? smem[lane] : 0.0f);
+        if (lane == 0) row_stats[1] = rsqrt(tot / (float)cols + eps);
+    }
+    barrier(CLK_LOCAL_MEM_FENCE);
+    const float inv_std = row_stats[1];
+
+    #pragma unroll
+    for (int i = 0; i < 16; ++i) {
+        const int c = lid + i * 256;
+        if (c < cols) {
+            float y = (reg_vals[i] - row_mean) * inv_std * gamma[c] + beta[c];
+            out[row_off + c] = y;
+        }
+    }
+}
+```
+
+### 6.2 Standalone RMSNorm Core (SLM Row Tile, 2 Barriers)
+
+`90.5–99 us` on `1024x4096 f32` (`1.25x` faster vs `oneDNN` `112.9 us` `[MEASURED]`). Reads `x` from global memory once; keeps `gamma` in L2 (also serves as the Tier-2 SLM staging template for `4096 < cols <= 8192`):
 
 ```cpp
 constexpr size_t WG = 128; // tune 64-128 for hidden=4096

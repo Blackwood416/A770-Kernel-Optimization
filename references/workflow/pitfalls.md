@@ -6,7 +6,7 @@
 
 | Feature / Pattern | A770 Status | Consequence & Rule |
 |---|---|---|
-| ESIMD `WG >= 256` (incl. `WG=512` attention) | Never schedules / TDR `[BUG]` | `WG=256` hangs silently; `WG=512` triggers Windows `VIDEO_TDR` even on a trivial kernel. Keep ESIMD `WG <= 128` (`128-GRF`) or `WG = 32` (`256-GRF` / SDPA) |
+| ESIMD `WG >= 256` (incl. `WG=512` attention) | Never schedules / TDR `[BUG]` | ESIMD-only gate (`1 item = 1 HW thread`): ESIMD `WG=256` hangs silently and `WG=512` triggers Windows `VIDEO_TDR`. Keep ESIMD `WG <= 128` (`128-GRF`) or `WG = 32` (`256-GRF`). Standard SYCL / OpenCL C at `SG=16` **safely uses `WG=256`** (`16` HW threads = `8 WGs/Xe-core`) |
 | `load_2d` / `store_2d` / `prefetch_2d` | PVC/Xe2+ only `[BUG]` | Compiles/assembles on DG2, then hangs forever (`TIMEOUT_KILLED`). Use `<= 256 B` `block_load` |
 | `named_barrier` | PVC-only `[TOOLCHAIN]` | Passes host compile, rejected at device JIT on Xe-HPG. Use standard `barrier()` or `split_barrier` |
 | `block_load` `512 B` | PVC-only `[ARCH]` | DG2 maximum LSC block width is `256 B` |
@@ -46,6 +46,9 @@
   - `sycl::reduce_over_group` on 32 lanes silently halves sums if register pressure narrows IGC to `SIMD16` (no cross-pass SLM merge); stage in per-slice SLM or audit `simd_size: 32`.
   - Never hardcode `SG=16` trip counts (compiler may pick `32`); never assume 2D local dim 0 is the sub-group axis (prefer 1D `nd_range`).
   - Always initialize local reduction accumulators before `atomic_ref::fetch_add`.
+- **Row-reduction numerical & fusion traps**:
+  - **Naive `E[x^2] - E[x]^2` LayerNorm variance**: Suffers catastrophic cancellation (`NaN` or large drift) when input rows have a large constant offset (e.g., `mean_shift = 200..1000`). Cache rows in GRF (`cols <= 4096`, `WG=256, SG=16, PER<=16`) and compute exact two-pass variance `(reg_vals[i] - row_mean)^2` in registers (zero DRAM re-read, zero loop division).
+  - **Uncached prologue recomputation + Welford loop division**: Re-reading global inputs and re-evaluating `erf()`/`gelu()` on Pass 2 alongside per-element `delta / count` divisions slows `2048x4096 f32` fused LayerNorm `1.55x–1.57x` (`386–404 us` vs `250–258 us` register-cached). Remember to access `reg_vals[_i]` strictly with `#pragma unroll` compile-time indices so LLVM SROA keeps `privateMemSize == 0`.
 - **Control flow & layout traps**:
   - Runtime `if/else` in ESIMD can hang; use `if constexpr` (never `#if FUSED` on template params).
   - Dead fields in kernel argument structs break native L0 `zeKernelSetArgumentValue` ABI counts.

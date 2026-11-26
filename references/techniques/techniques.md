@@ -67,7 +67,7 @@ Copy-ready core: [f32 / bf16 GEMV core](../api/code-snippets.md#5-domain-i-gemv-
   - `rows >= 16, hidden >= 4096`: `slm` (`WG 64–256`).
 - **Trap**: When `oneDNN` RMSNorm uses `f16`/`bf16` src, `scale` (`gamma`) **must** remain `f32` (`T*` corrupts output with `max_abs_err ~2.68` `[CORRECTNESS]`).
 
-Copy-ready core: [f32 RMSNorm SLM core](../api/code-snippets.md#6-domain-i-rmsnorm-core-slm-row-tile-2-barriers).
+Copy-ready core: [f32 RMSNorm SLM core](../api/code-snippets.md#62-standalone-rmsnorm-core-slm-row-tile-2-barriers).
 
 ### 2.3 Softmax (`f32`) `[MEASURED]`
 
@@ -76,3 +76,22 @@ Copy-ready core: [f32 RMSNorm SLM core](../api/code-snippets.md#6-domain-i-rmsno
 - **Measured vs `oneDNN 3.13.2` (`4/4 WIN`, `1.58x–3.55x`)**: `1024x1024` `16.4 vs 54.1 us` (`3.29x`), `1024x4096` `89.0 vs 213.9 us` (`2.40x`), `32x32768` `56.7 vs 201.0 us` (`3.55x`), `16x151936` `483.9 vs 763.8 us` (`1.58x`).
 
 Copy-ready core: [f32 Softmax SLM core](../api/code-snippets.md#7-domain-i-softmax-core-slm-row-tile--dynamic-wg).
+
+### 2.4 Fused Row Reductions (`Add [+ Act] + LayerNorm / RMSNorm / Softmax`): Three-Tier Caching Rule `[DISPATCH]` `[MEASURED]`
+
+When a pointwise prologue (`Add`, `BiasAdd`, `GELU`, `GeluErf`, `SiLU`) feeds a trailing row reduction (`LayerNorm`, `RMSNorm`, `Softmax`), re-reading global inputs and recomputing the prologue on Pass 2/3 destroys bandwidth (`~1.55x` slower on `2048x4096 f32`). Select the row-caching tier by hidden width `cols` (standard SYCL / OpenCL C, `SG=16`, `128-GRF`):
+
+| Hidden Width (`cols`) | Caching Tier | Geometry & Budget | Why |
+|---|---|---|---|
+| **`cols <= 4096`** | **GRF register-cached row** | `WG=64` (`<=512`), `WG=128` (`<=1024`), **`WG=256`** (`<=4096`, `16` HW threads = `8 WGs/Xe-core`), `PER <= 16` floats (`<= 32 GRF` out of `128`, `0 B` SLM row buffer) | Single global read, single prologue eval, zero SLM bank/capacity pressure, zero spills when indexed with `#pragma unroll` compile-time constants (`spill == 0 B && priv == 0 B`) |
+| **`4096 < cols <= 8192`** | **SLM row staging** | `WG=128–256`, `<= 32 KB` SLM (`vec16` aligned) | Avoids GRF spills (`> 32` floats/item) while keeping global reads single-pass |
+| **`cols > 8192`** | **Streaming multi-pass fallback** | `WG=128–256`, `0 B` row buffer (or 2-pass global max + tiled SLM for Softmax) | Exceeds safe per-WG SLM residency ceiling (`<= 32 KB`) |
+
+- **Exact two-pass variance in registers (for `LayerNorm`)**: Never use naive `E[x^2] - E[x]^2` (catastrophic cancellation at large mean shift `>= 200..1000`) and avoid per-element Welford `delta / count` divisions (`~50` cycles/div on DG2). Once the row sits in `float reg_vals[PER]`, Pass 1 sums `x` -> `row_mean`, Pass 2 scans **registers only** (`(reg_vals[i] - row_mean)^2`, zero DRAM reads, zero prologue recompute, zero loop divisions) -> `inv_std`, and Pass 3 writes normalized output with optional `gamma`/`beta`.
+- **Measured `2048x4096` fused row reductions (vs `WG=128` uncached streaming and `oneDNN 3.13.2`, `errors=0`, `spill=0 B, priv=0 B`) `[MEASURED]`**:
+  - `Add+LayerNorm (f32)`: `386.5 ->` **`249.5 us`** device (**`403.4 GB/s`** = `100%` read roof, **`1.55x`** faster vs streaming, **`2.24x`** vs `oneDNN` `560.1 us`).
+  - `Add+GeluErf+LayerNorm (f32)`: `403.9 ->` **`257.8 us`** device (**`390.5 GB/s`** = `96.9%` roof, **`1.57x`** faster vs streaming, **`2.79x`** vs `oneDNN` `718.1 us`).
+  - `Add+LayerNorm (bf16)`: `210.1 ->` **`168.3 us`** device (**`1.25x`** faster vs streaming, **`1.43x`** vs `oneDNN` `240.0 us`).
+  - `Add+GeluErf+LayerNorm (bf16)`: `242.9 ->` **`191.6 us`** device (**`1.27x`** faster vs streaming, **`1.68x`** vs `oneDNN` `322.0 us`).
+
+Copy-ready core: [Register-cached fused LayerNorm (WG=256, cols <= 4096)](../api/code-snippets.md#6-domain-i-rmsnorm-and-register-cached-fused-layernorm-cores).

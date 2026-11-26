@@ -15,8 +15,8 @@ Unify naming across SYCL, ESIMD, and profiler documentation:
 | Xe-cores / XVEs | `32` Xe-cores / `512` XVEs | Work-groups dispatch round-robin across `32` Xe-cores (`gid` and `gid + 32` share L1) |
 | HW threads (`128-GRF` / `256-GRF`) | `8` / `4` per XVE (`4,096` / `2,048` total) | `256-GRF` halves thread slots (`64` HW threads/Xe-core) in exchange for `16 KB` GRF/thread |
 | Register width | `256 bits` (`32 B` / GRF) | One `8x8` fp32 DPAS accumulator occupies `8` GRFs (`256 B`) |
-| Sub-group sizes | `8, 16, 32` | Standard SYCL may choose `32` even if local dim is `16`; always query `sg.get_local_range()[0]` |
-| ESIMD max WG size | `128` work-items (`128-GRF`) / `64` (`256-GRF`) | One ESIMD work-item = 1 HW thread; `WG >= 256` never schedules and hangs silently `[BUG]` |
+| Sub-group sizes | `8, 16, 32` | Standard SYCL may choose `32` even if local dim is `16`; always query `sg.get_local_range()[0]`. In standard SYCL / OpenCL C (`SG=16`), `WG=256` consumes only `16` HW threads (`8 WGs/Xe-core = 128/128` threads) and is optimal for GRF-cached row reductions (`cols <= 4096`) |
+| ESIMD max WG size | `128` work-items (`128-GRF`) / `64` (`256-GRF`) | ESIMD-only constraint: one ESIMD work-item = 1 HW thread; ESIMD `WG >= 256` never schedules and hangs silently `[BUG]` (does **not** restrict standard SYCL / OpenCL C `WG=256` at `SG=16`) |
 | SLM per Xe-core / per WG | `128 KB` per Xe-core / `64 KB` max per WG | Hard per-WG ceiling is `64 KB`; standard SYCL `local_accessor` at `64 KB` can fail launch |
 | L1 / L3 (LLC) | `192 KB` L1 per Xe-core / `16 MB` shared L3 | Single thread maintains L1-speed latency out to `~1 MB`; see [cache-geometry.md](cache-geometry.md) |
 | PVC-only features (absent on DG2) | `load_2d`/`prefetch_2d`, `named_barrier`, `512 B` block IO | Do not use on A770 (`load_2d` hangs; `named_barrier` fails JIT; max LSC block is `256 B`) |
